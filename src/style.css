@@ -87,6 +87,13 @@ body {
   padding: 4px 10px;
 }
 
+.pill-accent {
+  color: #062a28;
+  background: linear-gradient(90deg, #9be7ff, var(--accent));
+  border-color: transparent;
+  font-weight: 700;
+}
+
 .target-panel {
   background: var(--panel);
   border: 1px solid var(--line);
@@ -124,7 +131,14 @@ body {
   font-size: 0.9rem;
 }
 
+.timer-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
 .timer-track {
+  flex: 1;
   height: 8px;
   border-radius: 999px;
   background: rgba(255, 255, 255, 0.08);
@@ -144,6 +158,25 @@ body {
   background: linear-gradient(90deg, #a33, var(--danger));
 }
 
+.pause-btn {
+  flex-shrink: 0;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #1a2744;
+  color: var(--text);
+  font: inherit;
+  font-size: 0.78rem;
+  font-weight: 600;
+  padding: 6px 10px;
+  cursor: pointer;
+  touch-action: manipulation;
+  min-height: 32px;
+}
+
+.pause-btn:active {
+  transform: scale(0.97);
+}
+
 .timer-text {
   margin-top: 6px;
   font-family: var(--mono);
@@ -152,12 +185,71 @@ body {
   text-align: right;
 }
 
+.board-wrap {
+  position: relative;
+  isolation: isolate;
+}
+
+.board-wrap.is-paused .board {
+  filter: blur(10px);
+  opacity: 0.28;
+  pointer-events: none;
+  user-select: none;
+}
+
+.pause-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  padding: 16px;
+  border-radius: 14px;
+  background: rgba(7, 11, 22, 0.72);
+  backdrop-filter: blur(2px);
+}
+
+.pause-overlay[hidden] {
+  display: none;
+}
+
+.pause-title {
+  margin: 0;
+  font-size: 1.25rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text);
+}
+
+.pause-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  width: min(100%, 280px);
+}
+
+.pause-actions .btn {
+  flex: 1 1 110px;
+}
+
+.btn-primary {
+  background: linear-gradient(180deg, #2a6b66, #1a4542);
+  border-color: rgba(61, 214, 198, 0.45);
+}
+
 .board {
   --grid: 8;
   display: grid;
   grid-template-columns: repeat(var(--grid), 1fr);
   gap: 6px;
   user-select: none;
+  transition:
+    filter 0.18s ease,
+    opacity 0.18s ease;
 }
 
 .board.shake {
