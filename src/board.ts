@@ -8,7 +8,7 @@ export type Board = number[]
 
 export interface PuzzleBoard {
   cells: Board
-  /** Digits that appear on the board (unique), ascending. */
+  /** Digits 0–9 exactly once, shuffled from the puzzle seed. */
   targets: number[]
 }
 
@@ -34,24 +34,35 @@ function buildBoard(seed: number): PuzzleBoard {
     cells[i] = guaranteed[i]!
   }
 
-  const present = new Set(cells)
-  const targets = [...present].sort((a, b) => a - b)
+  // Every digit 0–9 appears; target order is shuffled from the puzzle seed.
+  const targets = shuffleTargets(seed)
   return { cells, targets }
 }
 
+/** Deterministic Fisher–Yates of digits 0–9 from the puzzle id / seed. */
+export function shuffleTargets(puzzleId: number): number[] {
+  const targets = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+  const rand = mulberry32(hashSeed(puzzleId ^ 0x71eeb10c))
+  for (let i = targets.length - 1; i > 0; i--) {
+    const j = Math.floor(rand() * (i + 1))
+    ;[targets[i], targets[j]] = [targets[j]!, targets[i]!]
+  }
+  return targets
+}
+
 /** Pre-generated boards indexed by puzzle id 1..BOARD_COUNT (wraps). */
-const CACHE: PuzzleBoard[] = []
+const CACHE: Board[] = []
 for (let i = 0; i < BOARD_COUNT; i++) {
-  CACHE.push(buildBoard(i + 1))
+  CACHE.push(buildBoard(i + 1).cells)
 }
 
 export function generateBoard(puzzleId: number): PuzzleBoard {
   const idx = ((puzzleId - 1) % BOARD_COUNT + BOARD_COUNT) % BOARD_COUNT
-  const base = CACHE[idx]!
-  // Return a shallow copy so mutations (scramble) don't poison the cache.
+  const cells = CACHE[idx]!.slice()
+  // Target order is derived from the actual puzzle id so ?puzzle=N is stable.
   return {
-    cells: base.cells.slice(),
-    targets: base.targets.slice(),
+    cells,
+    targets: shuffleTargets(puzzleId),
   }
 }
 
