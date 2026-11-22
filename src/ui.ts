@@ -18,6 +18,7 @@ import {
   type GameState,
   type TargetStat,
 } from './game.ts'
+import { celebrateLineForRound, mountMascot } from './mascot.ts'
 import { readModeFromUrl, writeModeToUrl, type GameMode } from './mode.ts'
 
 export function mount(root: HTMLElement): void {
@@ -126,6 +127,7 @@ function mountGame(root: HTMLElement, mode: GameMode): void {
           <button type="button" class="pause-btn" id="pause-btn" aria-label="Pause">Pause</button>
         </div>
         <div class="timer-text" id="timer-text">45.0s</div>
+        <div class="mascot-slot" id="mascot-slot"></div>
       </section>
 
       <div class="board-wrap" id="board-wrap">
@@ -185,6 +187,8 @@ function mountGame(root: HTMLElement, mode: GameMode): void {
   const resultsReplay = root.querySelector<HTMLButtonElement>('#results-replay')!
   const modeSwitch = root.querySelector<HTMLButtonElement>('#mode-switch')!
   const patternAssist = root.querySelector<HTMLInputElement>('#pattern-assist')!
+  const mascotSlot = root.querySelector<HTMLElement>('#mascot-slot')!
+  const mascot = mountMascot(mascotSlot)
 
   boardEl.style.setProperty('--grid', String(GRID))
   boardEl.classList.toggle('board-color', mode === 'color')
@@ -259,6 +263,14 @@ function mountGame(root: HTMLElement, mode: GameMode): void {
     timerFill.classList.toggle('urgent', state.timeLeft <= 8)
     timerText.textContent = `${state.timeLeft.toFixed(1)}s`
     setPausedUi(state.status === 'paused')
+    // Keep search pose while paused if the clock is still in the last ~10s.
+    const searching =
+      !resultsOpen &&
+      state.timeLeft > 0 &&
+      state.timeLeft <= 10 &&
+      (state.status === 'playing' || state.status === 'paused')
+    mascot.setUrgentSearch(searching)
+    mascot.setPaused(state.status === 'paused')
   }
 
   function flashMiss(): void {
@@ -345,6 +357,15 @@ function mountGame(root: HTMLElement, mode: GameMode): void {
     boardWrap.classList.add('is-paused')
     pauseBtn.disabled = true
     hint.textContent = 'Round complete — pick Play again or Replay.'
+
+    const totalMisses = targetStats.reduce((n, t) => n + t.misses, 0)
+    const line = celebrateLineForRound({
+      newBest,
+      roundScore: state.roundScore,
+      totalMisses,
+      targetCount: targetStats.length,
+    })
+    mascot.setCelebrate(true, line)
   }
 
   function closeResults(): void {
@@ -352,6 +373,8 @@ function mountGame(root: HTMLElement, mode: GameMode): void {
     resultsOverlay.hidden = true
     resultsDisclaimer.hidden = true
     pauseBtn.disabled = false
+    mascot.setCelebrate(false)
+    mascot.reset()
   }
 
   function onTap(index: number): void {
@@ -364,11 +387,13 @@ function mountGame(root: HTMLElement, mode: GameMode): void {
             ? 'Wrong color — target cells restored & scrambled.'
             : 'Wrong digit — target cells restored & scrambled.'
         flashMiss()
+        mascot.setMood('oops', { holdMs: 500 })
         renderBoard()
         renderHud()
         break
       case 'hit':
         hint.textContent = `${result.remaining} left to find.`
+        mascot.setMood('happy', { holdMs: 420 })
         renderBoard()
         renderHud()
         break
@@ -380,6 +405,7 @@ function mountGame(root: HTMLElement, mode: GameMode): void {
               ? `+${result.points} — next color!`
               : `+${result.points} — next digit!`
         }
+        mascot.setMood('cheer', { holdMs: 700 })
         syncDeadlineFromState()
         renderBoard()
         renderHud()
@@ -427,6 +453,7 @@ function mountGame(root: HTMLElement, mode: GameMode): void {
     restartCurrentPuzzle(state)
     syncDeadlineFromState()
     newBestUntil = 0
+    mascot.reset()
     hint.textContent = 'Puzzle restarted.'
     renderBoard()
     renderHud()
@@ -437,6 +464,7 @@ function mountGame(root: HTMLElement, mode: GameMode): void {
     newRandomPuzzle(state)
     syncDeadlineFromState()
     newBestUntil = 0
+    mascot.reset()
     hint.textContent =
       mode === 'color' ? 'New puzzle — find the target color.' : 'New puzzle — find the target digit.'
     renderBoard()
@@ -448,6 +476,7 @@ function mountGame(root: HTMLElement, mode: GameMode): void {
     restartCurrentPuzzle(state)
     syncDeadlineFromState()
     newBestUntil = 0
+    mascot.reset()
     hint.textContent = 'Same puzzle — go again.'
     renderBoard()
     renderHud()
