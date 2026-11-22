@@ -12,27 +12,34 @@ import {
   GROUP_LABEL,
   type ConfusionGroup,
 } from './colors.ts'
+import type { Difficulty } from './difficulty.ts'
 import type { GameMode } from './mode.ts'
 import { mulberry32, hashSeed } from './prng.ts'
 import { generateShapeBoard } from './shapes.ts'
 
 /** v2 keys — size-weighted scoring is not comparable to pre-grow bests. */
 const BESTS_VERSION = 'v2'
-const HS_KEYS: Record<GameMode, string> = {
-  number: `numberfind-highscore-${BESTS_VERSION}`,
-  color: `colorfind-highscore-${BESTS_VERSION}`,
-  shape: `shapefind-highscore-${BESTS_VERSION}`,
+const MODE_PREFIX: Record<GameMode, string> = {
+  number: 'numberfind',
+  color: 'colorfind',
+  shape: 'shapefind',
 }
-const PUZZLE_BEST_KEYS: Record<GameMode, string> = {
-  number: `numberfind-puzzle-bests-${BESTS_VERSION}`,
-  color: `colorfind-puzzle-bests-${BESTS_VERSION}`,
-  shape: `shapefind-puzzle-bests-${BESTS_VERSION}`,
+
+function hsKey(mode: GameMode, difficulty: Difficulty): string {
+  const base = `${MODE_PREFIX[mode]}-highscore-${BESTS_VERSION}`
+  return difficulty === 'hard' ? `${base}-hard` : base
 }
+
+function puzzleBestKey(mode: GameMode, difficulty: Difficulty): string {
+  const base = `${MODE_PREFIX[mode]}-puzzle-bests-${BESTS_VERSION}`
+  return difficulty === 'hard' ? `${base}-hard` : base
+}
+
 const BASE_TIMER = 45
 const TIMER_STEP = 2
 const TIMER_EVERY = 5
 
-export type GameStatus = 'playing' | 'paused' | 'won'
+export type GameStatus = 'playing' | 'paused' | 'won' | 'failed'
 
 export interface GroupStat {
   hits: number
@@ -55,6 +62,7 @@ export interface TargetStat {
 
 export interface GameState {
   mode: GameMode
+  difficulty: Difficulty
   puzzleId: number
   board: PuzzleBoard
   /** Indices cleared this round (any target) on the current board. */
@@ -70,9 +78,13 @@ export interface GameState {
   roundScore: number
   /** Cumulative session score. */
   sessionScore: number
-  /** All-time best session score for this mode. */
+  /** Session score when the current round began (Hard fail rollback). */
+  sessionScoreAtRoundStart: number
+  /** All-time best session score for this mode + difficulty. */
   highScore: number
-  /** Best round score for the current puzzle seed in this mode. */
+  /** High score when the current round began (Hard fail rollback). */
+  highScoreAtStart: number
+  /** Best round score for the current puzzle seed in this mode + difficulty. */
   puzzleBest: number
   /** Puzzle-best score when this round started (for New best! detection). */
   puzzleBestAtStart: number
@@ -126,25 +138,25 @@ function parseNonNegInt(raw: string | null): number {
   return Math.floor(n)
 }
 
-export function loadHighScore(mode: GameMode): number {
+export function loadHighScore(mode: GameMode, difficulty: Difficulty): number {
   try {
-    return parseNonNegInt(localStorage.getItem(HS_KEYS[mode]))
+    return parseNonNegInt(localStorage.getItem(hsKey(mode, difficulty)))
   } catch {
     return 0
   }
 }
 
-function saveHighScore(mode: GameMode, score: number): void {
+function saveHighScore(mode: GameMode, difficulty: Difficulty, score: number): void {
   try {
-    localStorage.setItem(HS_KEYS[mode], String(Math.max(0, Math.floor(score))))
+    localStorage.setItem(hsKey(mode, difficulty), String(Math.max(0, Math.floor(score))))
   } catch {
     /* ignore quota / private mode */
   }
 }
 
-function loadPuzzleBestMap(mode: GameMode): Record<string, number> {
+function loadPuzzleBestMap(mode: GameMode, difficulty: Difficulty): Record<string, number> {
   try {
-    const raw = localStorage.getItem(PUZZLE_BEST_KEYS[mode])
+    const raw = localStorage.getItem(puzzleBestKey(mode, difficulty))
     if (!raw) return {}
     const parsed: unknown = JSON.parse(raw)
     if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {}
@@ -167,24 +179,37 @@ function loadPuzzleBestMap(mode: GameMode): Record<string, number> {
   }
 }
 
-function savePuzzleBestMap(mode: GameMode, map: Record<string, number>): void {
+function savePuzzleBestMap(
+  mode: GameMode,
+  difficulty: Difficulty,
+  map: Record<string, number>,
+): void {
   try {
-    localStorage.setItem(PUZZLE_BEST_KEYS[mode], JSON.stringify(map))
+    localStorage.setItem(puzzleBestKey(mode, difficulty), JSON.stringify(map))
   } catch {
     /* ignore */
   }
 }
 
-export function loadPuzzleBest(mode: GameMode, puzzleId: number): number {
-  const map = loadPuzzleBestMap(mode)
+export function loadPuzzleBest(
+  mode: GameMode,
+  difficulty: Difficulty,
+  puzzleId: number,
+): number {
+  const map = loadPuzzleBestMap(mode, difficulty)
   const v = map[String(puzzleId)]
   return typeof v === 'number' && Number.isFinite(v) && v >= 0 ? v : 0
 }
 
-function savePuzzleBest(mode: GameMode, puzzleId: number, score: number): void {
-  const map = loadPuzzleBestMap(mode)
+function savePuzzleBest(
+  mode: GameMode,
+  difficulty: Difficulty,
+  puzzleId: number,
+  score: number,
+): void {
+  const map = loadPuzzleBestMap(mode, difficulty)
   map[String(puzzleId)] = Math.max(0, Math.floor(score))
-  savePuzzleBestMap(mode, map)
+  savePuzzleBestMap(mode, difficulty, map)
 }
 
 /** Update overall + per-puzzle bests after banking points. Returns whether either was beaten. */
@@ -192,12 +217,12 @@ export function recordScoreBests(state: GameState): boolean {
   let beat = false
   if (state.sessionScore > state.highScore) {
     state.highScore = state.sessionScore
-    saveHighScore(state.mode, state.highScore)
+    saveHighScore(state.mode, state.difficulty, state.highScore)
     beat = true
   }
   if (state.roundScore > state.puzzleBest) {
     state.puzzleBest = state.roundScore
-    savePuzzleBest(state.mode, state.puzzleId, state.puzzleBest)
+    savePuzzleBest(state.mode, state.difficulty, state.puzzleId, state.puzzleBest)
     beat = true
   }
   state.justBeatBest = beat
@@ -238,13 +263,19 @@ export function resizeBoardForCurrentTarget(state: GameState): boolean {
   return true
 }
 
-export function createGame(mode: GameMode, puzzleId = readPuzzleFromUrl()): GameState {
+export function createGame(
+  mode: GameMode,
+  puzzleId = readPuzzleFromUrl(),
+  difficulty: Difficulty = 'easy',
+): GameState {
   const grid = gridForTargetIndex(0)
   const board = buildBoard(mode, puzzleId, 0, grid)
   writePuzzleToUrl(puzzleId)
-  const puzzleBest = loadPuzzleBest(mode, puzzleId)
+  const puzzleBest = loadPuzzleBest(mode, difficulty, puzzleId)
+  const highScore = loadHighScore(mode, difficulty)
   return {
     mode,
+    difficulty,
     puzzleId,
     board,
     cleared: new Set(),
@@ -254,7 +285,9 @@ export function createGame(mode: GameMode, puzzleId = readPuzzleFromUrl()): Game
     puzzlesDone: 0,
     roundScore: 0,
     sessionScore: 0,
-    highScore: loadHighScore(mode),
+    sessionScoreAtRoundStart: 0,
+    highScore,
+    highScoreAtStart: highScore,
     puzzleBest,
     puzzleBestAtStart: puzzleBest,
     justBeatBest: false,
@@ -463,10 +496,48 @@ export function tapCell(state: GameState, index: number): TapResult {
   }
 }
 
-export function onTimerExpired(state: GameState): void {
+export type TimerExpireResult = { kind: 'retry' } | { kind: 'failed' }
+
+/**
+ * Easy: restore current target and restart the countdown.
+ * Hard: fail the round — revert score to 0 / target 1 / 8×8.
+ */
+export function onTimerExpired(state: GameState): TimerExpireResult {
+  if (state.difficulty === 'hard') {
+    failHardRound(state)
+    return { kind: 'failed' }
+  }
   accrueTargetTime(state)
   restoreCurrentTarget(state)
   startTargetTimer(state)
+  return { kind: 'retry' }
+}
+
+/** Hard timeout: roll back this round's points/bests and reset to target 1 / 8×8. */
+export function failHardRound(state: GameState): void {
+  state.sessionScore = state.sessionScoreAtRoundStart
+  state.roundScore = 0
+  if (state.highScore !== state.highScoreAtStart) {
+    state.highScore = state.highScoreAtStart
+    saveHighScore(state.mode, state.difficulty, state.highScore)
+  }
+  if (state.puzzleBest !== state.puzzleBestAtStart) {
+    state.puzzleBest = state.puzzleBestAtStart
+    savePuzzleBest(state.mode, state.difficulty, state.puzzleId, state.puzzleBest)
+  }
+  state.justBeatBest = false
+
+  const grid = gridForTargetIndex(0)
+  state.board = buildBoard(state.mode, state.puzzleId, state.puzzlesDone, grid)
+  state.cleared = new Set()
+  state.clearedCurrent = new Set()
+  state.targetIndex = 0
+  state.timeLeft = 0
+  state.groupStats = emptyGroupStats()
+  state.targetStats = []
+  state.currentMisses = 0
+  state.currentTargetTimeMs = 0
+  state.status = 'failed'
 }
 
 export function pauseGame(state: GameState): boolean {
@@ -483,6 +554,19 @@ export function resumeGame(state: GameState): boolean {
   return true
 }
 
+function beginRound(state: GameState): void {
+  state.sessionScoreAtRoundStart = state.sessionScore
+  state.highScoreAtStart = state.highScore
+  state.puzzleBest = loadPuzzleBest(state.mode, state.difficulty, state.puzzleId)
+  state.puzzleBestAtStart = state.puzzleBest
+  state.justBeatBest = false
+  state.roundScore = 0
+  state.groupStats = emptyGroupStats()
+  state.targetStats = []
+  state.status = 'playing'
+  beginTarget(state)
+}
+
 /** Restart the current puzzle seed; keep session score / puzzlesDone. */
 export function restartCurrentPuzzle(state: GameState): void {
   const grid = gridForTargetIndex(0)
@@ -492,14 +576,7 @@ export function restartCurrentPuzzle(state: GameState): void {
   state.cleared = new Set()
   state.clearedCurrent = new Set()
   state.targetIndex = 0
-  state.roundScore = 0
-  state.justBeatBest = false
-  state.puzzleBest = loadPuzzleBest(state.mode, state.puzzleId)
-  state.puzzleBestAtStart = state.puzzleBest
-  state.status = 'playing'
-  state.groupStats = emptyGroupStats()
-  state.targetStats = []
-  beginTarget(state)
+  beginRound(state)
 }
 
 export function advanceToPuzzle(state: GameState, puzzleId: number): void {
@@ -511,14 +588,17 @@ export function advanceToPuzzle(state: GameState, puzzleId: number): void {
   state.cleared = new Set()
   state.clearedCurrent = new Set()
   state.targetIndex = 0
-  state.roundScore = 0
-  state.justBeatBest = false
-  state.puzzleBest = loadPuzzleBest(state.mode, puzzleId)
-  state.puzzleBestAtStart = state.puzzleBest
-  state.status = 'playing'
-  state.groupStats = emptyGroupStats()
-  state.targetStats = []
-  beginTarget(state)
+  beginRound(state)
+}
+
+/** Switch Easy/Hard mid-session: reload bests for the new bucket, keep puzzle seed. */
+export function setDifficulty(state: GameState, difficulty: Difficulty): void {
+  if (state.difficulty === difficulty) return
+  state.difficulty = difficulty
+  state.sessionScore = 0
+  state.puzzlesDone = 0
+  state.highScore = loadHighScore(state.mode, difficulty)
+  restartCurrentPuzzle(state)
 }
 
 export function newRandomPuzzle(state: GameState): void {

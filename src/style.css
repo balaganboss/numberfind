@@ -519,6 +519,49 @@ body {
   gap: 10px;
 }
 
+.brand-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.difficulty-picker {
+  display: inline-flex;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  overflow: hidden;
+  background: rgba(10, 16, 32, 0.55);
+}
+
+.diff-btn {
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  padding: 6px 10px;
+  cursor: pointer;
+  touch-action: manipulation;
+  min-height: 36px;
+}
+
+.diff-btn + .diff-btn {
+  border-left: 1px solid var(--line);
+}
+
+.diff-btn.is-active {
+  background: rgba(61, 214, 198, 0.18);
+  color: var(--accent);
+}
+
+.diff-btn[data-diff='hard'].is-active {
+  background: rgba(255, 107, 122, 0.18);
+  color: var(--danger);
+}
+
 .mode-switch {
   border: 1px solid var(--line);
   border-radius: 999px;
@@ -531,6 +574,19 @@ body {
   cursor: pointer;
   touch-action: manipulation;
   min-height: 36px;
+}
+
+.pill-hard {
+  color: var(--danger);
+  border-color: rgba(255, 107, 122, 0.35);
+}
+
+.shell.is-failed .results-overlay {
+  border-color: rgba(255, 107, 122, 0.28);
+}
+
+.fail-actions .btn-primary {
+  border-color: rgba(255, 107, 122, 0.45);
 }
 
 /* —— ColorFind cells —— */

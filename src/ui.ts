@@ -1,6 +1,12 @@
 import { scoreWeightForGrid } from './board.ts'
 import { COLOR_BY_ID, patternSymbol } from './colors.ts'
 import {
+  applyDifficulty,
+  difficultyLabel,
+  resolveDifficulty,
+  type Difficulty,
+} from './difficulty.ts'
+import {
   createGame,
   currentTarget,
   isNewPuzzleBest,
@@ -13,6 +19,7 @@ import {
   resumeGame,
   roundTotalTimeSec,
   SCORE_SCALE_NOTE,
+  setDifficulty,
   summarizeGroupStats,
   tapCell,
   timerBudget,
@@ -24,6 +31,7 @@ import { modeBrand, readModeFromUrl, writeModeToUrl, type GameMode } from './mod
 import { SHAPE_BY_ID, shapeSvgMarkup } from './shapes.ts'
 
 export function mount(root: HTMLElement): void {
+  applyDifficulty(resolveDifficulty())
   const initialMode = readModeFromUrl()
   if (!initialMode) {
     showModePicker(root)
@@ -53,7 +61,7 @@ function showModePicker(root: HTMLElement): void {
           <span class="mode-card-desc">Hunt matching shapes in any color — lookalikes sneak in later.</span>
         </button>
       </div>
-      <p class="hint">Puzzle seed stays in the URL. Scores are tracked per mode.</p>
+      <p class="hint">Puzzle seed stays in the URL. Scores are tracked per mode and difficulty.</p>
     </div>
   `
 
@@ -73,12 +81,15 @@ function showModePicker(root: HTMLElement): void {
 
 function mountGame(root: HTMLElement, mode: GameMode): void {
   writeModeToUrl(mode)
-  let state: GameState = createGame(mode)
+  const initialDifficulty = resolveDifficulty()
+  applyDifficulty(initialDifficulty)
+  let state: GameState = createGame(mode, undefined, initialDifficulty)
   let deadlineMs: number | null = performance.now() + state.timeLeft * 1000
   let raf = 0
   let newBestUntil = 0
   let pauseLatchUntil = 0
   let resultsOpen = false
+  let failedOpen = false
 
   function syncDeadlineFromState(): void {
     if (state.status === 'playing') {
@@ -109,9 +120,16 @@ function mountGame(root: HTMLElement, mode: GameMode): void {
       <header class="top">
         <div class="brand-row">
           <div class="brand">${brandName}</div>
-          <button type="button" class="mode-switch" id="mode-switch" aria-label="Switch mode">Modes</button>
+          <div class="brand-controls">
+            <div class="difficulty-picker" role="group" aria-label="Difficulty">
+              <button type="button" class="diff-btn" data-diff="easy" id="diff-easy">Easy</button>
+              <button type="button" class="diff-btn" data-diff="hard" id="diff-hard">Hard</button>
+            </div>
+            <button type="button" class="mode-switch" id="mode-switch" aria-label="Switch mode">Modes</button>
+          </div>
         </div>
         <div class="meta">
+          <span class="pill" id="diff-label"></span>
           <span class="pill" id="puzzle-label"></span>
           <span class="pill" id="grid-label"></span>
           <span class="pill" id="score-label"></span>
@@ -147,7 +165,7 @@ function mountGame(root: HTMLElement, mode: GameMode): void {
           <div class="timer-text" id="timer-text">45.0s</div>
         </div>
         <div class="target-done" id="target-done" hidden>
-          <p class="target-done-title">Round complete</p>
+          <p class="target-done-title" id="target-done-title">Round complete</p>
           <p class="target-done-sub" id="target-done-sub">Nice hunting.</p>
         </div>
         <div class="mascot-slot" id="mascot-slot"></div>
@@ -163,7 +181,7 @@ function mountGame(root: HTMLElement, mode: GameMode): void {
           </div>
         </div>
         <div class="results-overlay" id="results-overlay" hidden>
-          <p class="results-title">Round summary</p>
+          <p class="results-title" id="results-title">Round summary</p>
           <div class="results-body" id="results-body"></div>
           <p class="results-disclaimer" id="results-disclaimer" hidden>${MEDICAL_DISCLAIMER}</p>
         </div>
@@ -180,6 +198,10 @@ function mountGame(root: HTMLElement, mode: GameMode): void {
         <button type="button" class="btn btn-primary" id="results-play-again">Play again</button>
         <button type="button" class="btn" id="results-replay">Replay this puzzle</button>
       </footer>
+      <footer class="actions results-actions fail-actions" id="fail-actions" hidden>
+        <button type="button" class="btn btn-primary" id="fail-try-again">Try again</button>
+        <button type="button" class="btn" id="fail-new-puzzle">New puzzle</button>
+      </footer>
       <p class="hint" id="hint">${findHint}</p>
     </div>
   `
@@ -189,6 +211,7 @@ function mountGame(root: HTMLElement, mode: GameMode): void {
   const boardEl = root.querySelector<HTMLElement>('#board')!
   const targetPlay = root.querySelector<HTMLElement>('#target-play')!
   const targetDone = root.querySelector<HTMLElement>('#target-done')!
+  const targetDoneTitle = root.querySelector<HTMLElement>('#target-done-title')!
   const targetDoneSub = root.querySelector<HTMLElement>('#target-done-sub')!
   const targetDigit = root.querySelector<HTMLElement>('#target-digit')!
   const targetSwatchWrap = root.querySelector<HTMLElement>('#target-swatch-wrap')!
@@ -200,6 +223,7 @@ function mountGame(root: HTMLElement, mode: GameMode): void {
   const targetLeft = root.querySelector<HTMLElement>('#target-left')!
   const timerFill = root.querySelector<HTMLElement>('#timer-fill')!
   const timerText = root.querySelector<HTMLElement>('#timer-text')!
+  const diffLabel = root.querySelector<HTMLElement>('#diff-label')!
   const puzzleLabel = root.querySelector<HTMLElement>('#puzzle-label')!
   const gridLabel = root.querySelector<HTMLElement>('#grid-label')!
   const scoreLabel = root.querySelector<HTMLElement>('#score-label')!
@@ -208,17 +232,23 @@ function mountGame(root: HTMLElement, mode: GameMode): void {
   const hint = root.querySelector<HTMLElement>('#hint')!
   const playActions = root.querySelector<HTMLElement>('#play-actions')!
   const resultsActions = root.querySelector<HTMLElement>('#results-actions')!
+  const failActions = root.querySelector<HTMLElement>('#fail-actions')!
   const newBtn = root.querySelector<HTMLButtonElement>('#new-puzzle')!
   const pauseBtn = root.querySelector<HTMLButtonElement>('#pause-btn')!
   const pauseOverlay = root.querySelector<HTMLElement>('#pause-overlay')!
   const resumeBtn = root.querySelector<HTMLButtonElement>('#resume-btn')!
   const restartBtn = root.querySelector<HTMLButtonElement>('#restart-btn')!
   const resultsOverlay = root.querySelector<HTMLElement>('#results-overlay')!
+  const resultsTitle = root.querySelector<HTMLElement>('#results-title')!
   const resultsBody = root.querySelector<HTMLElement>('#results-body')!
   const resultsDisclaimer = root.querySelector<HTMLElement>('#results-disclaimer')!
   const resultsPlayAgain = root.querySelector<HTMLButtonElement>('#results-play-again')!
   const resultsReplay = root.querySelector<HTMLButtonElement>('#results-replay')!
+  const failTryAgain = root.querySelector<HTMLButtonElement>('#fail-try-again')!
+  const failNewPuzzle = root.querySelector<HTMLButtonElement>('#fail-new-puzzle')!
   const modeSwitch = root.querySelector<HTMLButtonElement>('#mode-switch')!
+  const diffEasyBtn = root.querySelector<HTMLButtonElement>('#diff-easy')!
+  const diffHardBtn = root.querySelector<HTMLButtonElement>('#diff-hard')!
   const patternAssist = root.querySelector<HTMLInputElement>('#pattern-assist')!
   const mascotSlot = root.querySelector<HTMLElement>('#mascot-slot')!
   const mascot = mountMascot(mascotSlot)
@@ -235,9 +265,20 @@ function mountGame(root: HTMLElement, mode: GameMode): void {
     boardEl.classList.toggle('board-shape', mode === 'shape')
   }
 
+  function overlayBlocking(): boolean {
+    return resultsOpen || failedOpen
+  }
+
+  function syncDiffButtons(): void {
+    diffEasyBtn.classList.toggle('is-active', state.difficulty === 'easy')
+    diffHardBtn.classList.toggle('is-active', state.difficulty === 'hard')
+    diffEasyBtn.setAttribute('aria-pressed', state.difficulty === 'easy' ? 'true' : 'false')
+    diffHardBtn.setAttribute('aria-pressed', state.difficulty === 'hard' ? 'true' : 'false')
+  }
+
   function setPausedUi(paused: boolean): void {
-    boardWrap.classList.toggle('is-paused', paused || resultsOpen)
-    pauseOverlay.hidden = !paused || resultsOpen
+    boardWrap.classList.toggle('is-paused', paused || overlayBlocking())
+    pauseOverlay.hidden = !paused || overlayBlocking()
     pauseBtn.textContent = paused ? 'Resume' : 'Pause'
     pauseBtn.setAttribute('aria-label', paused ? 'Resume' : 'Pause')
     pauseBtn.setAttribute('aria-pressed', paused ? 'true' : 'false')
@@ -245,21 +286,64 @@ function mountGame(root: HTMLElement, mode: GameMode): void {
 
   function setResultsUi(open: boolean, celebrateMsg?: string): void {
     resultsOpen = open
-    shellEl.classList.toggle('is-results', open)
-    targetPlay.hidden = open
-    targetDone.hidden = !open
-    playActions.hidden = open
+    if (open) failedOpen = false
+    shellEl.classList.toggle('is-results', open || failedOpen)
+    shellEl.classList.toggle('is-failed', failedOpen)
+    targetPlay.hidden = open || failedOpen
+    targetDone.hidden = !(open || failedOpen)
+    playActions.hidden = open || failedOpen
     resultsActions.hidden = !open
+    failActions.hidden = true
     resultsOverlay.hidden = !open
     pauseOverlay.hidden = true
-    boardWrap.classList.toggle('is-paused', open || state.status === 'paused')
-    pauseBtn.disabled = open
+    boardWrap.classList.toggle('is-paused', open || failedOpen || state.status === 'paused')
+    pauseBtn.disabled = open || failedOpen
     if (open) {
+      targetDoneTitle.textContent = 'Round complete'
       targetDoneSub.textContent = celebrateMsg ?? 'Nice hunting.'
+      resultsTitle.textContent = 'Round summary'
       hint.textContent = 'Pick Play again or Replay this puzzle.'
-    } else {
+    } else if (!failedOpen) {
       resultsDisclaimer.hidden = true
       resultsBody.innerHTML = ''
+    }
+  }
+
+  function setFailUi(open: boolean): void {
+    failedOpen = open
+    if (open) resultsOpen = false
+    shellEl.classList.toggle('is-results', open || resultsOpen)
+    shellEl.classList.toggle('is-failed', open)
+    targetPlay.hidden = open || resultsOpen
+    targetDone.hidden = !(open || resultsOpen)
+    playActions.hidden = open || resultsOpen
+    resultsActions.hidden = true
+    failActions.hidden = !open
+    resultsOverlay.hidden = !open
+    pauseOverlay.hidden = true
+    boardWrap.classList.toggle('is-paused', open || resultsOpen || state.status === 'paused')
+    pauseBtn.disabled = open || resultsOpen
+    if (open) {
+      targetDoneTitle.textContent = "Time's up!"
+      targetDoneSub.textContent = 'Almost — try that seed again?'
+      resultsTitle.textContent = "Time's up!"
+      resultsBody.innerHTML = `
+        <div class="results-scoreboard">
+          <div class="results-score-main">
+            <span class="results-score-label">Difficulty</span>
+            <span class="results-score-value">${difficultyLabel(state.difficulty)}</span>
+          </div>
+          <div class="results-score-total">
+            <span class="results-score-label">Puzzle</span>
+            <span class="results-score-value">${state.puzzleId}</span>
+          </div>
+        </div>
+        <p class="results-insight">The clock ran out. Score resets to 0 — same seed or a fresh board.</p>
+      `
+      resultsDisclaimer.hidden = true
+      hint.textContent = 'Try again (same seed) or New puzzle.'
+      mascot.setCelebrate(false)
+      mascot.setMood('oops', { line: "Time's up!", holdMs: 60_000 })
     }
   }
 
@@ -347,6 +431,8 @@ function mountGame(root: HTMLElement, mode: GameMode): void {
       targetDigit.textContent = String(t)
     }
     targetLeft.textContent = `${rem} left`
+    diffLabel.textContent = difficultyLabel(state.difficulty)
+    diffLabel.classList.toggle('pill-hard', state.difficulty === 'hard')
     puzzleLabel.textContent = `Puzzle ${state.puzzleId}`
     gridLabel.textContent =
       weight === 1
@@ -361,8 +447,9 @@ function mountGame(root: HTMLElement, mode: GameMode): void {
     timerFill.classList.toggle('urgent', state.timeLeft <= 8)
     timerText.textContent = `${state.timeLeft.toFixed(1)}s`
     setPausedUi(state.status === 'paused')
+    syncDiffButtons()
     const searching =
-      !resultsOpen &&
+      !overlayBlocking() &&
       state.timeLeft > 0 &&
       state.timeLeft <= 10 &&
       (state.status === 'playing' || state.status === 'paused')
@@ -412,10 +499,13 @@ function mountGame(root: HTMLElement, mode: GameMode): void {
       `<div class="results-score-main"><span class="results-score-label">Round score</span><span class="results-score-value">${state.roundScore}</span></div>`,
     )
     lines.push(
-      `<div class="results-score-best${newBest ? ' is-new' : ''}"><span class="results-score-label">Best</span><span class="results-score-value">${state.puzzleBest}${newBest ? ' <em>New best!</em>' : ''}</span></div>`,
+      `<div class="results-score-best${newBest ? ' is-new' : ''}"><span class="results-score-label">Best · ${difficultyLabel(state.difficulty)}</span><span class="results-score-value">${state.puzzleBest}${newBest ? ' <em>New best!</em>' : ''}</span></div>`,
     )
     lines.push(
       `<div class="results-score-total"><span class="results-score-label">Total time</span><span class="results-score-value">${totalSec.toFixed(1)}s</span></div>`,
+    )
+    lines.push(
+      `<div class="results-score-diff"><span class="results-score-label">Difficulty</span><span class="results-score-value">${difficultyLabel(state.difficulty)}</span></div>`,
     )
     lines.push('</div>')
 
@@ -466,13 +556,14 @@ function mountGame(root: HTMLElement, mode: GameMode): void {
 
   function closeResults(): void {
     setResultsUi(false)
+    setFailUi(false)
     pauseBtn.disabled = false
     mascot.setCelebrate(false)
     mascot.reset()
   }
 
   function onTap(index: number): void {
-    if (state.status !== 'playing' || resultsOpen) return
+    if (state.status !== 'playing' || overlayBlocking()) return
     const result = tapCell(state, index)
     switch (result.kind) {
       case 'miss':
@@ -528,7 +619,7 @@ function mountGame(root: HTMLElement, mode: GameMode): void {
   }
 
   function enterPause(): boolean {
-    if (resultsOpen || state.status !== 'playing') return false
+    if (overlayBlocking() || state.status !== 'playing') return false
     freezeTimeLeftFromDeadline()
     if (!pauseGame(state)) return false
     hint.textContent = 'Paused — board hidden.'
@@ -537,7 +628,7 @@ function mountGame(root: HTMLElement, mode: GameMode): void {
   }
 
   function leavePause(): boolean {
-    if (resultsOpen) return false
+    if (overlayBlocking()) return false
     if (!resumeGame(state)) return false
     syncDeadlineFromState()
     hint.textContent = 'Resumed — keep finding.'
@@ -546,12 +637,28 @@ function mountGame(root: HTMLElement, mode: GameMode): void {
   }
 
   function togglePause(): void {
-    if (resultsOpen) return
+    if (overlayBlocking()) return
     const now = performance.now()
     if (now < pauseLatchUntil) return
     pauseLatchUntil = now + 320
     if (state.status === 'paused') leavePause()
     else if (state.status === 'playing') enterPause()
+  }
+
+  function changeDifficulty(next: Difficulty): void {
+    if (state.difficulty === next) return
+    closeResults()
+    applyDifficulty(next)
+    setDifficulty(state, next)
+    syncDeadlineFromState()
+    newBestUntil = 0
+    mascot.reset()
+    hint.textContent =
+      next === 'hard'
+        ? 'Hard — timer expire ends the round.'
+        : 'Easy — timer expire retries the target.'
+    renderBoard()
+    renderHud()
   }
 
   function doRestart(): void {
@@ -593,7 +700,7 @@ function mountGame(root: HTMLElement, mode: GameMode): void {
   }
 
   boardEl.addEventListener('pointerup', (e) => {
-    if (state.status !== 'playing' || resultsOpen) return
+    if (state.status !== 'playing' || overlayBlocking()) return
     if (e.pointerType === 'mouse' && e.button !== 0) return
     const el = (e.target as HTMLElement).closest<HTMLElement>('.cell')
     if (!el || el.classList.contains('cleared')) return
@@ -615,6 +722,11 @@ function mountGame(root: HTMLElement, mode: GameMode): void {
 
   resultsPlayAgain.addEventListener('click', () => doPlayAgain())
   resultsReplay.addEventListener('click', () => doReplayPuzzle())
+  failTryAgain.addEventListener('click', () => doReplayPuzzle())
+  failNewPuzzle.addEventListener('click', () => doPlayAgain())
+
+  diffEasyBtn.addEventListener('click', () => changeDifficulty('easy'))
+  diffHardBtn.addEventListener('click', () => changeDifficulty('hard'))
 
   pauseBtn.addEventListener('pointerup', (e) => {
     if (e.pointerType === 'mouse' && e.button !== 0) return
@@ -673,22 +785,31 @@ function mountGame(root: HTMLElement, mode: GameMode): void {
   })
 
   function tick(ts: number): void {
-    if (state.status === 'playing' && !resultsOpen) {
+    if (state.status === 'playing' && !overlayBlocking()) {
       if (deadlineMs == null) syncDeadlineFromState()
       state.timeLeft = Math.max(0, ((deadlineMs ?? ts) - ts) / 1000)
       if (state.timeLeft <= 0) {
         state.timeLeft = 0
-        onTimerExpired(state)
-        syncDeadlineFromState()
-        hint.textContent =
-          mode === 'color'
-            ? 'Time up — find that color again.'
-            : mode === 'shape'
-              ? 'Time up — find that shape again.'
-              : 'Time up — find that digit again.'
-        renderBoard()
+        const expired = onTimerExpired(state)
+        if (expired.kind === 'failed') {
+          deadlineMs = null
+          setFailUi(true)
+          renderBoard()
+          renderHud()
+        } else {
+          syncDeadlineFromState()
+          hint.textContent =
+            mode === 'color'
+              ? 'Time up — find that color again.'
+              : mode === 'shape'
+                ? 'Time up — find that shape again.'
+                : 'Time up — find that digit again.'
+          renderBoard()
+          renderHud()
+        }
+      } else {
+        renderHud()
       }
-      renderHud()
     } else if (state.status === 'paused') {
       if (newBestUntil > 0) renderHud()
     }

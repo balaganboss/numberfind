@@ -8,7 +8,11 @@ export type MascotMood =
   | 'search'
   | 'celebrate'
 
-export type CelebrateLine = 'New best!' | 'Nice finding!' | 'Keep practicing!'
+export type CelebrateLine =
+  | 'New best!'
+  | 'Nice finding!'
+  | 'Keep practicing!'
+  | "Time's up!"
 
 const THEME = '#0b1020'
 
