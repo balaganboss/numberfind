@@ -111,22 +111,28 @@ function mountGame(root: HTMLElement, mode: GameMode): void {
       </header>
 
       <section class="target-panel">
-        <div class="target-row">
-          <span class="target-label">Find</span>
-          <span class="target-digit" id="target-digit">0</span>
-          <span class="target-swatch-wrap" id="target-swatch-wrap" hidden>
-            <span class="target-swatch" id="target-swatch" aria-hidden="true"></span>
-            <span class="target-color-name" id="target-color-name"></span>
-          </span>
-          <span class="target-left" id="target-left"></span>
-        </div>
-        <div class="timer-row">
-          <div class="timer-track" aria-hidden="true">
-            <div class="timer-fill" id="timer-fill"></div>
+        <div class="target-play" id="target-play">
+          <div class="target-row">
+            <span class="target-label">Find</span>
+            <span class="target-digit" id="target-digit">0</span>
+            <span class="target-swatch-wrap" id="target-swatch-wrap" hidden>
+              <span class="target-swatch" id="target-swatch" aria-hidden="true"></span>
+              <span class="target-color-name" id="target-color-name"></span>
+            </span>
+            <span class="target-left" id="target-left"></span>
           </div>
-          <button type="button" class="pause-btn" id="pause-btn" aria-label="Pause">Pause</button>
+          <div class="timer-row">
+            <div class="timer-track" aria-hidden="true">
+              <div class="timer-fill" id="timer-fill"></div>
+            </div>
+            <button type="button" class="pause-btn" id="pause-btn" aria-label="Pause">Pause</button>
+          </div>
+          <div class="timer-text" id="timer-text">45.0s</div>
         </div>
-        <div class="timer-text" id="timer-text">45.0s</div>
+        <div class="target-done" id="target-done" hidden>
+          <p class="target-done-title">Round complete</p>
+          <p class="target-done-sub" id="target-done-sub">Nice hunting.</p>
+        </div>
         <div class="mascot-slot" id="mascot-slot"></div>
       </section>
 
@@ -143,26 +149,30 @@ function mountGame(root: HTMLElement, mode: GameMode): void {
           <p class="results-title">Round summary</p>
           <div class="results-body" id="results-body"></div>
           <p class="results-disclaimer" id="results-disclaimer" hidden>${MEDICAL_DISCLAIMER}</p>
-          <div class="pause-actions results-actions">
-            <button type="button" class="btn btn-primary" id="results-play-again">Play again</button>
-            <button type="button" class="btn" id="results-replay">Replay this puzzle</button>
-          </div>
         </div>
       </div>
 
-      <footer class="actions">
+      <footer class="actions play-actions" id="play-actions">
         <button type="button" class="btn" id="new-puzzle">New Puzzle</button>
         <label class="assist-toggle" id="assist-wrap" ${mode === 'color' ? '' : 'hidden'}>
           <input type="checkbox" id="pattern-assist" />
           <span>Pattern assist</span>
         </label>
       </footer>
+      <footer class="actions results-actions" id="results-actions" hidden>
+        <button type="button" class="btn btn-primary" id="results-play-again">Play again</button>
+        <button type="button" class="btn" id="results-replay">Replay this puzzle</button>
+      </footer>
       <p class="hint" id="hint">${findHint}</p>
     </div>
   `
 
+  const shellEl = root.querySelector<HTMLElement>('.shell')!
   const boardWrap = root.querySelector<HTMLElement>('#board-wrap')!
   const boardEl = root.querySelector<HTMLElement>('#board')!
+  const targetPlay = root.querySelector<HTMLElement>('#target-play')!
+  const targetDone = root.querySelector<HTMLElement>('#target-done')!
+  const targetDoneSub = root.querySelector<HTMLElement>('#target-done-sub')!
   const targetDigit = root.querySelector<HTMLElement>('#target-digit')!
   const targetSwatchWrap = root.querySelector<HTMLElement>('#target-swatch-wrap')!
   const targetSwatch = root.querySelector<HTMLElement>('#target-swatch')!
@@ -175,6 +185,8 @@ function mountGame(root: HTMLElement, mode: GameMode): void {
   const hsLabel = root.querySelector<HTMLElement>('#hs-label')!
   const puzzleBestLabel = root.querySelector<HTMLElement>('#puzzle-best-label')!
   const hint = root.querySelector<HTMLElement>('#hint')!
+  const playActions = root.querySelector<HTMLElement>('#play-actions')!
+  const resultsActions = root.querySelector<HTMLElement>('#results-actions')!
   const newBtn = root.querySelector<HTMLButtonElement>('#new-puzzle')!
   const pauseBtn = root.querySelector<HTMLButtonElement>('#pause-btn')!
   const pauseOverlay = root.querySelector<HTMLElement>('#pause-overlay')!
@@ -201,6 +213,26 @@ function mountGame(root: HTMLElement, mode: GameMode): void {
     pauseBtn.textContent = paused ? 'Resume' : 'Pause'
     pauseBtn.setAttribute('aria-label', paused ? 'Resume' : 'Pause')
     pauseBtn.setAttribute('aria-pressed', paused ? 'true' : 'false')
+  }
+
+  function setResultsUi(open: boolean, celebrateMsg?: string): void {
+    resultsOpen = open
+    shellEl.classList.toggle('is-results', open)
+    targetPlay.hidden = open
+    targetDone.hidden = !open
+    playActions.hidden = open
+    resultsActions.hidden = !open
+    resultsOverlay.hidden = !open
+    pauseOverlay.hidden = true
+    boardWrap.classList.toggle('is-paused', open || state.status === 'paused')
+    pauseBtn.disabled = open
+    if (open) {
+      targetDoneSub.textContent = celebrateMsg ?? 'Nice hunting.'
+      hint.textContent = 'Pick Play again or Replay this puzzle.'
+    } else {
+      resultsDisclaimer.hidden = true
+      resultsBody.innerHTML = ''
+    }
   }
 
   function renderBoard(): void {
@@ -294,10 +326,16 @@ function mountGame(root: HTMLElement, mode: GameMode): void {
   }
 
   function showRoundSummary(targetStats: TargetStat[]): void {
-    resultsOpen = true
     deadlineMs = null
     const newBest = isNewPuzzleBest(state)
     const totalSec = roundTotalTimeSec(state)
+    const totalMisses = targetStats.reduce((n, t) => n + t.misses, 0)
+    const line = celebrateLineForRound({
+      newBest,
+      roundScore: state.roundScore,
+      totalMisses,
+      targetCount: targetStats.length,
+    })
     const lines: string[] = []
 
     lines.push('<div class="results-scoreboard">')
@@ -352,26 +390,12 @@ function mountGame(root: HTMLElement, mode: GameMode): void {
     }
 
     resultsBody.innerHTML = lines.join('')
-    resultsOverlay.hidden = false
-    pauseOverlay.hidden = true
-    boardWrap.classList.add('is-paused')
-    pauseBtn.disabled = true
-    hint.textContent = 'Round complete — pick Play again or Replay.'
-
-    const totalMisses = targetStats.reduce((n, t) => n + t.misses, 0)
-    const line = celebrateLineForRound({
-      newBest,
-      roundScore: state.roundScore,
-      totalMisses,
-      targetCount: targetStats.length,
-    })
+    setResultsUi(true, line)
     mascot.setCelebrate(true, line)
   }
 
   function closeResults(): void {
-    resultsOpen = false
-    resultsOverlay.hidden = true
-    resultsDisclaimer.hidden = true
+    setResultsUi(false)
     pauseBtn.disabled = false
     mascot.setCelebrate(false)
     mascot.reset()
