@@ -1,0 +1,248 @@
+:root {
+  --bg0: #070b16;
+  --bg1: #121a2e;
+  --panel: rgba(18, 28, 52, 0.92);
+  --line: rgba(140, 170, 230, 0.18);
+  --text: #e8eefc;
+  --muted: #8fa0c4;
+  --accent: #3dd6c6;
+  --accent-dim: #1f8f85;
+  --danger: #ff6b7a;
+  --cell: #1a243c;
+  --cell-hover: #243352;
+  --cleared: #0d1526;
+  --shadow: 0 12px 40px rgba(0, 0, 0, 0.45);
+  --sans: 'Segoe UI', 'Trebuchet MS', 'Avenir Next', sans-serif;
+  --mono: 'SF Mono', 'Cascadia Mono', 'Consolas', monospace;
+  color-scheme: dark;
+  font-family: var(--sans);
+  background:
+    radial-gradient(1200px 700px at 10% -10%, #1a2b55 0%, transparent 55%),
+    radial-gradient(900px 600px at 100% 0%, #143a3a 0%, transparent 50%),
+    linear-gradient(160deg, var(--bg0), var(--bg1));
+  color: var(--text);
+  -webkit-tap-highlight-color: transparent;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  min-height: 100%;
+}
+
+body {
+  min-height: 100dvh;
+}
+
+#app {
+  min-height: 100dvh;
+  display: flex;
+  justify-content: center;
+  padding: 12px 12px calc(16px + env(safe-area-inset-bottom));
+}
+
+.shell {
+  width: min(100%, 440px);
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.top {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-top: env(safe-area-inset-top);
+}
+
+.brand {
+  font-size: clamp(1.6rem, 6vw, 2rem);
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  background: linear-gradient(90deg, #9be7ff, var(--accent));
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+.meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.pill {
+  font-size: 0.78rem;
+  color: var(--muted);
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 4px 10px;
+}
+
+.target-panel {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  padding: 12px 14px 10px;
+  box-shadow: var(--shadow);
+}
+
+.target-row {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+.target-label {
+  color: var(--muted);
+  font-size: 0.9rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.target-digit {
+  font-family: var(--mono);
+  font-size: 2.4rem;
+  font-weight: 700;
+  line-height: 1;
+  color: var(--accent);
+  min-width: 1.2ch;
+}
+
+.target-left {
+  margin-left: auto;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.timer-track {
+  height: 8px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+  overflow: hidden;
+}
+
+.timer-fill {
+  height: 100%;
+  width: 100%;
+  transform-origin: left center;
+  background: linear-gradient(90deg, var(--accent-dim), var(--accent));
+  transition: transform 0.08s linear;
+  border-radius: inherit;
+}
+
+.timer-fill.urgent {
+  background: linear-gradient(90deg, #a33, var(--danger));
+}
+
+.timer-text {
+  margin-top: 6px;
+  font-family: var(--mono);
+  font-size: 0.85rem;
+  color: var(--muted);
+  text-align: right;
+}
+
+.board {
+  --grid: 8;
+  display: grid;
+  grid-template-columns: repeat(var(--grid), 1fr);
+  gap: 6px;
+  user-select: none;
+}
+
+.board.shake {
+  animation: shake 0.28s ease;
+}
+
+@keyframes shake {
+  0%,
+  100% {
+    transform: translateX(0);
+  }
+  25% {
+    transform: translateX(-4px);
+  }
+  75% {
+    transform: translateX(4px);
+  }
+}
+
+.cell {
+  aspect-ratio: 1;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--cell);
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: clamp(1rem, 4.2vw, 1.35rem);
+  font-weight: 600;
+  cursor: pointer;
+  touch-action: manipulation;
+  transition:
+    background 0.12s ease,
+    transform 0.08s ease,
+    opacity 0.15s ease;
+}
+
+.cell:hover:not(:disabled) {
+  background: var(--cell-hover);
+}
+
+.cell:active:not(:disabled) {
+  transform: scale(0.94);
+}
+
+.cell.cleared {
+  opacity: 0.22;
+  background: var(--cleared);
+  cursor: default;
+}
+
+.actions {
+  display: flex;
+  gap: 8px;
+}
+
+.btn {
+  flex: 1;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: linear-gradient(180deg, #243456, #18243c);
+  color: var(--text);
+  font: inherit;
+  font-weight: 600;
+  padding: 12px 16px;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+
+.btn:active {
+  transform: scale(0.98);
+}
+
+.hint {
+  margin: 0;
+  text-align: center;
+  color: var(--muted);
+  font-size: 0.85rem;
+  min-height: 1.3em;
+}
+
+@media (min-width: 480px) {
+  .board {
+    gap: 8px;
+  }
+  .cell {
+    border-radius: 12px;
+  }
+}
