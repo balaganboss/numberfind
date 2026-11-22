@@ -16,9 +16,26 @@ import {
 
 export function mount(root: HTMLElement): void {
   let state: GameState = createGame()
-  let lastTs = performance.now()
+  /** Wall-clock deadline for the active target timer; null while paused / idle. */
+  let deadlineMs: number | null = performance.now() + state.timeLeft * 1000
   let raf = 0
   let newBestUntil = 0
+  /** Ignore duplicate pointerup+click (or double-taps) within this window. */
+  let pauseLatchUntil = 0
+
+  function syncDeadlineFromState(): void {
+    if (state.status === 'playing') {
+      deadlineMs = performance.now() + Math.max(0, state.timeLeft) * 1000
+    } else {
+      deadlineMs = null
+    }
+  }
+
+  function freezeTimeLeftFromDeadline(): void {
+    if (deadlineMs == null) return
+    state.timeLeft = Math.max(0, (deadlineMs - performance.now()) / 1000)
+    deadlineMs = null
+  }
 
   root.innerHTML = `
     <div class="shell">
@@ -156,6 +173,7 @@ export function mount(root: HTMLElement): void {
       case 'digit-done':
         noteNewBest(result.newBest)
         if (!result.newBest) hint.textContent = `+${result.points} — next digit!`
+        syncDeadlineFromState()
         renderBoard()
         renderHud()
         break
@@ -164,9 +182,11 @@ export function mount(root: HTMLElement): void {
         if (!result.newBest) {
           hint.textContent = `Puzzle clear! +${result.points}. Loading next…`
         }
+        deadlineMs = null
         renderHud()
         window.setTimeout(() => {
           advanceToPuzzle(state, result.nextPuzzle)
+          syncDeadlineFromState()
           renderBoard()
           renderHud()
           hint.textContent = 'New puzzle — find the target digit.'
@@ -177,56 +197,86 @@ export function mount(root: HTMLElement): void {
     }
   }
 
-  function enterPause(): void {
-    if (!pauseGame(state)) return
+  function enterPause(): boolean {
+    if (state.status !== 'playing') return false
+    freezeTimeLeftFromDeadline()
+    if (!pauseGame(state)) return false
     hint.textContent = 'Paused — board hidden.'
     renderHud()
+    return true
   }
 
-  function leavePause(): void {
-    if (!resumeGame(state)) return
-    lastTs = performance.now()
+  function leavePause(): boolean {
+    if (!resumeGame(state)) return false
+    syncDeadlineFromState()
     hint.textContent = 'Resumed — keep finding.'
     renderHud()
+    return true
   }
 
   function togglePause(): void {
+    const now = performance.now()
+    if (now < pauseLatchUntil) return
+    pauseLatchUntil = now + 320
     if (state.status === 'paused') leavePause()
     else if (state.status === 'playing') enterPause()
   }
 
   function doRestart(): void {
     restartCurrentPuzzle(state)
-    lastTs = performance.now()
+    syncDeadlineFromState()
     newBestUntil = 0
     hint.textContent = 'Puzzle restarted.'
     renderBoard()
     renderHud()
   }
 
-  boardEl.addEventListener('click', (e) => {
+  boardEl.addEventListener('pointerup', (e) => {
     if (state.status !== 'playing') return
+    if (e.pointerType === 'mouse' && e.button !== 0) return
     const el = (e.target as HTMLElement).closest<HTMLElement>('.cell')
     if (!el || el.classList.contains('cleared')) return
     const index = Number(el.dataset.index)
     if (!Number.isFinite(index)) return
+    e.preventDefault()
     onTap(index)
   })
 
   newBtn.addEventListener('click', () => {
     newRandomPuzzle(state)
-    lastTs = performance.now()
+    syncDeadlineFromState()
     newBestUntil = 0
     hint.textContent = 'Fresh puzzle loaded.'
     renderBoard()
     renderHud()
   })
 
-  pauseBtn.addEventListener('click', () => {
+  // pointerup is more reliable than click-only on some mobile browsers;
+  // latch prevents the following synthetic click from immediately unpausing.
+  function onPauseControlPointerUp(e: PointerEvent): void {
+    if (e.pointerType === 'mouse' && e.button !== 0) return
+    e.preventDefault()
+    togglePause()
+  }
+  pauseBtn.addEventListener('pointerup', onPauseControlPointerUp)
+  pauseBtn.addEventListener('click', (e) => {
+    e.preventDefault()
     togglePause()
   })
 
-  resumeBtn.addEventListener('click', () => {
+  resumeBtn.addEventListener('pointerup', (e) => {
+    if (e.pointerType === 'mouse' && e.button !== 0) return
+    e.preventDefault()
+    const now = performance.now()
+    if (now < pauseLatchUntil) return
+    pauseLatchUntil = now + 320
+    leavePause()
+  })
+  resumeBtn.addEventListener('click', (e) => {
+    e.preventDefault()
+    const now = performance.now()
+    if (now < pauseLatchUntil) return
+    pauseLatchUntil = now + 320
     leavePause()
   })
 
@@ -236,9 +286,12 @@ export function mount(root: HTMLElement): void {
 
   window.addEventListener('keydown', (e) => {
     if (e.code !== 'Space' && e.key !== ' ') return
-    const tag = (e.target as HTMLElement | null)?.tagName
-    if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'BUTTON' || tag === 'SELECT') return
-    if ((e.target as HTMLElement | null)?.isContentEditable) return
+    const el = e.target as HTMLElement | null
+    const tag = el?.tagName
+    if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return
+    if (el?.isContentEditable) return
+    // Board cells and the Pause control are <button>s — still treat Space as pause,
+    // and preventDefault so Space does not activate a focused cell.
     e.preventDefault()
     togglePause()
   })
@@ -250,19 +303,19 @@ export function mount(root: HTMLElement): void {
   })
 
   function tick(ts: number): void {
-    const dt = Math.min(0.1, (ts - lastTs) / 1000)
-    lastTs = ts
     if (state.status === 'playing') {
-      state.timeLeft -= dt
+      if (deadlineMs == null) syncDeadlineFromState()
+      state.timeLeft = Math.max(0, ((deadlineMs ?? ts) - ts) / 1000)
       if (state.timeLeft <= 0) {
         state.timeLeft = 0
         onTimerExpired(state)
+        syncDeadlineFromState()
         hint.textContent = 'Time up — find that digit again.'
         renderBoard()
       }
       renderHud()
     } else if (state.status === 'paused') {
-      // Keep "New best!" pill in sync while frozen.
+      // Keep "New best!" pill in sync while frozen; timer stays at frozen timeLeft.
       if (newBestUntil > 0) renderHud()
     }
     raf = requestAnimationFrame(tick)
@@ -271,7 +324,5 @@ export function mount(root: HTMLElement): void {
   renderBoard()
   renderHud()
   raf = requestAnimationFrame(tick)
-
-  // Keep raf id referenced for possible future teardown.
   void raf
 }
