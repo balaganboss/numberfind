@@ -44,7 +44,14 @@ body {
   min-height: 100dvh;
   display: flex;
   justify-content: center;
-  padding: 12px 12px calc(16px + env(safe-area-inset-bottom));
+  padding: 12px 10px calc(16px + env(safe-area-inset-bottom));
+}
+
+@media (max-width: 430px) {
+  #app {
+    padding-left: 6px;
+    padding-right: 6px;
+  }
 }
 
 .shell {
@@ -586,6 +593,165 @@ body {
   font-weight: 700;
   color: var(--accent);
   letter-spacing: 0.02em;
+}
+
+.target-shape-wrap {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.target-shape-icon {
+  width: 2.2rem;
+  height: 2.2rem;
+  flex-shrink: 0;
+  display: grid;
+  place-items: center;
+}
+
+.target-shape-icon .target-shape-svg,
+.target-shape-icon svg {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+.target-shape-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+
+.target-shape-name {
+  font-size: 1.2rem;
+  font-weight: 700;
+  color: var(--accent);
+  letter-spacing: 0.02em;
+  line-height: 1.15;
+}
+
+.target-shape-hint {
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+/* —— ShapeFind cells —— */
+.cell-shape {
+  position: relative;
+  display: grid;
+  place-items: center;
+  padding: 10%;
+  background: #141e34;
+  overflow: hidden;
+}
+
+.cell-shape:hover:not(:disabled) {
+  background: #1b2742;
+}
+
+.cell-shape-icon {
+  width: 78%;
+  height: 78%;
+  display: grid;
+  place-items: center;
+  pointer-events: none;
+}
+
+.cell-shape-icon svg {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+.cell-shape.cleared {
+  opacity: 0.2;
+}
+
+.cell-shape.cleared .cell-shape-icon {
+  filter: grayscale(0.35);
+}
+
+/* —— Growing board sizes (keep 12×12 tappable on phones) —— */
+.board[data-grid='10'] {
+  gap: 4px;
+}
+
+.board[data-grid='10'] .cell {
+  border-radius: 8px;
+  font-size: clamp(0.82rem, 3.4vw, 1.15rem);
+}
+
+.board[data-grid='12'] {
+  gap: 1px;
+  /* Reclaim shell padding so 12×12 stays tappable on ~390px phones. */
+  width: calc(100% + 8px);
+  margin-inline: -4px;
+}
+
+.board[data-grid='12'] .cell {
+  border-radius: 5px;
+  font-size: clamp(0.68rem, 2.8vw, 0.95rem);
+  min-height: 0;
+  /* Prefer finger-friendly hit area; visual gap stays 1px. */
+  min-width: 0;
+}
+
+.board[data-grid='12'] .cell-shape {
+  padding: 7%;
+}
+
+.board[data-grid='12'] .cell-pattern {
+  font-size: clamp(0.55rem, 2.4vw, 0.8rem);
+}
+
+.board.is-growing {
+  animation: board-grow 0.48s ease;
+}
+
+@keyframes board-grow {
+  0% {
+    transform: scale(0.9);
+    opacity: 0.55;
+  }
+  55% {
+    transform: scale(1.03);
+    opacity: 1;
+  }
+  100% {
+    transform: scale(1);
+    opacity: 1;
+  }
+}
+
+.results-scale-note {
+  margin: 8px 0 0;
+  font-size: 0.68rem;
+  line-height: 1.35;
+  color: var(--muted);
+  text-align: left;
+}
+
+@media (max-width: 380px) {
+  .board[data-grid='12'] {
+    gap: 1px;
+    width: calc(100% + 12px);
+    margin-inline: -6px;
+  }
+
+  .target-shape-name {
+    font-size: 1.05rem;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .board.is-growing {
+    animation: none;
+  }
 }
 
 .assist-toggle {

@@ -1,4 +1,10 @@
-import { CELL_COUNT, generateBoard, type PuzzleBoard } from './board.ts'
+import {
+  generateBoard,
+  gridForTargetIndex,
+  scoreWeightForGrid,
+  type GridSize,
+  type PuzzleBoard,
+} from './board.ts'
 import {
   COLOR_BY_ID,
   CONFUSION_GROUPS,
@@ -8,14 +14,19 @@ import {
 } from './colors.ts'
 import type { GameMode } from './mode.ts'
 import { mulberry32, hashSeed } from './prng.ts'
+import { generateShapeBoard } from './shapes.ts'
 
+/** v2 keys — size-weighted scoring is not comparable to pre-grow bests. */
+const BESTS_VERSION = 'v2'
 const HS_KEYS: Record<GameMode, string> = {
-  number: 'numberfind-highscore',
-  color: 'colorfind-highscore',
+  number: `numberfind-highscore-${BESTS_VERSION}`,
+  color: `colorfind-highscore-${BESTS_VERSION}`,
+  shape: `shapefind-highscore-${BESTS_VERSION}`,
 }
 const PUZZLE_BEST_KEYS: Record<GameMode, string> = {
-  number: 'numberfind-puzzle-bests',
-  color: 'colorfind-puzzle-bests',
+  number: `numberfind-puzzle-bests-${BESTS_VERSION}`,
+  color: `colorfind-puzzle-bests-${BESTS_VERSION}`,
+  shape: `shapefind-puzzle-bests-${BESTS_VERSION}`,
 }
 const BASE_TIMER = 45
 const TIMER_STEP = 2
@@ -38,13 +49,15 @@ export interface TargetStat {
   misses: number
   timeMs: number
   points: number
+  /** Board size while this target was active. */
+  grid: GridSize
 }
 
 export interface GameState {
   mode: GameMode
   puzzleId: number
   board: PuzzleBoard
-  /** Indices cleared this round (any target). */
+  /** Indices cleared this round (any target) on the current board. */
   cleared: Set<number>
   /** Indices cleared for the current target. */
   clearedCurrent: Set<number>
@@ -191,16 +204,43 @@ export function recordScoreBests(state: GameState): boolean {
   return beat
 }
 
-function buildBoard(mode: GameMode, puzzleId: number, puzzlesDone: number): PuzzleBoard {
+function buildBoard(
+  mode: GameMode,
+  puzzleId: number,
+  puzzlesDone: number,
+  grid: GridSize,
+  targets?: number[],
+): PuzzleBoard {
   if (mode === 'color') {
-    const b = generateColorBoard(puzzleId, puzzlesDone)
-    return { cells: b.cells, targets: b.targets }
+    const b = generateColorBoard(puzzleId, puzzlesDone, grid, targets)
+    return { grid: b.grid, cells: b.cells, targets: b.targets }
   }
-  return generateBoard(puzzleId)
+  if (mode === 'shape') {
+    const b = generateShapeBoard(puzzleId, puzzlesDone, grid, targets)
+    return { grid: b.grid, cells: b.cells, targets: b.targets, cellColors: b.cellColors }
+  }
+  return generateBoard(puzzleId, grid, targets)
+}
+
+/** Rebuild cells for the current target's size tier; keeps target order. */
+export function resizeBoardForCurrentTarget(state: GameState): boolean {
+  const nextGrid = gridForTargetIndex(state.targetIndex)
+  if (nextGrid === state.board.grid) return false
+  state.board = buildBoard(
+    state.mode,
+    state.puzzleId,
+    state.puzzlesDone,
+    nextGrid,
+    state.board.targets,
+  )
+  state.cleared = new Set()
+  state.clearedCurrent = new Set()
+  return true
 }
 
 export function createGame(mode: GameMode, puzzleId = readPuzzleFromUrl()): GameState {
-  const board = buildBoard(mode, puzzleId, 0)
+  const grid = gridForTargetIndex(0)
+  const board = buildBoard(mode, puzzleId, 0, grid)
   writePuzzleToUrl(puzzleId)
   const puzzleBest = loadPuzzleBest(mode, puzzleId)
   return {
@@ -240,7 +280,7 @@ export function currentGroup(state: GameState): ConfusionGroup {
 export function remainingForTarget(state: GameState): number {
   const t = currentTarget(state)
   let n = 0
-  for (let i = 0; i < CELL_COUNT; i++) {
+  for (let i = 0; i < state.board.cells.length; i++) {
     if (state.board.cells[i] === t && !state.cleared.has(i)) n++
   }
   return n
@@ -278,6 +318,7 @@ function finalizeTarget(state: GameState, points: number): void {
     misses: state.currentMisses,
     timeMs: state.currentTargetTimeMs,
     points,
+    grid: state.board.grid,
   })
   state.currentMisses = 0
   state.currentTargetTimeMs = 0
@@ -312,20 +353,21 @@ export function penalizeWrongTap(state: GameState): void {
   restoreCurrentTarget(state)
 
   const unfound: number[] = []
-  for (let i = 0; i < CELL_COUNT; i++) {
+  for (let i = 0; i < state.board.cells.length; i++) {
     if (state.board.cells[i] === t && !state.cleared.has(i)) {
       unfound.push(i)
     }
   }
 
   const visible: number[] = []
-  for (let i = 0; i < CELL_COUNT; i++) {
+  for (let i = 0; i < state.board.cells.length; i++) {
     if (!state.cleared.has(i) && state.board.cells[i] !== t) {
       visible.push(i)
     }
   }
 
   const rand = mulberry32(hashSeed(state.puzzleId * 10007 + unfound.length * 13 + Date.now()))
+  const colors = state.board.cellColors
   for (const from of unfound) {
     if (visible.length === 0) break
     const vi = Math.floor(rand() * visible.length)
@@ -333,6 +375,11 @@ export function penalizeWrongTap(state: GameState): void {
     const tmp = state.board.cells[from]!
     state.board.cells[from] = state.board.cells[to]!
     state.board.cells[to] = tmp
+    if (colors) {
+      const ctmp = colors[from]!
+      colors[from] = colors[to]!
+      colors[to] = ctmp
+    }
     visible[vi] = visible[visible.length - 1]!
     visible.pop()
   }
@@ -342,7 +389,13 @@ export type TapResult =
   | { kind: 'miss' }
   | { kind: 'already' }
   | { kind: 'hit'; remaining: number }
-  | { kind: 'digit-done'; points: number; newBest: boolean }
+  | {
+      kind: 'digit-done'
+      points: number
+      newBest: boolean
+      leveledUp: boolean
+      grid: GridSize
+    }
   | {
       kind: 'puzzle-done'
       points: number
@@ -350,6 +403,11 @@ export type TapResult =
       groupStats: Record<ConfusionGroup, GroupStat>
       targetStats: TargetStat[]
     }
+
+export function pointsForClear(state: GameState): number {
+  const weight = scoreWeightForGrid(state.board.grid)
+  return Math.max(0, Math.ceil(state.timeLeft * weight))
+}
 
 export function tapCell(state: GameState, index: number): TapResult {
   if (state.status !== 'playing') return { kind: 'already' }
@@ -375,7 +433,7 @@ export function tapCell(state: GameState, index: number): TapResult {
     return { kind: 'hit', remaining }
   }
 
-  const points = Math.ceil(state.timeLeft)
+  const points = pointsForClear(state)
   finalizeTarget(state, points)
   state.roundScore += points
   state.sessionScore += points
@@ -383,8 +441,15 @@ export function tapCell(state: GameState, index: number): TapResult {
 
   if (state.targetIndex + 1 < state.board.targets.length) {
     state.targetIndex++
+    const leveledUp = resizeBoardForCurrentTarget(state)
     beginTarget(state)
-    return { kind: 'digit-done', points, newBest }
+    return {
+      kind: 'digit-done',
+      points,
+      newBest,
+      leveledUp,
+      grid: state.board.grid,
+    }
   }
 
   state.puzzlesDone++
@@ -420,7 +485,8 @@ export function resumeGame(state: GameState): boolean {
 
 /** Restart the current puzzle seed; keep session score / puzzlesDone. */
 export function restartCurrentPuzzle(state: GameState): void {
-  const board = buildBoard(state.mode, state.puzzleId, state.puzzlesDone)
+  const grid = gridForTargetIndex(0)
+  const board = buildBoard(state.mode, state.puzzleId, state.puzzlesDone, grid)
   writePuzzleToUrl(state.puzzleId)
   state.board = board
   state.cleared = new Set()
@@ -437,7 +503,8 @@ export function restartCurrentPuzzle(state: GameState): void {
 }
 
 export function advanceToPuzzle(state: GameState, puzzleId: number): void {
-  const board = buildBoard(state.mode, puzzleId, state.puzzlesDone)
+  const grid = gridForTargetIndex(0)
+  const board = buildBoard(state.mode, puzzleId, state.puzzlesDone, grid)
   writePuzzleToUrl(puzzleId)
   state.puzzleId = puzzleId
   state.board = board
@@ -492,3 +559,6 @@ export function summarizeGroupStats(
 
 export const MEDICAL_DISCLAIMER =
   'This is a game, not a medical test. If you have concerns about your color vision, see an eye care professional.'
+
+export const SCORE_SCALE_NOTE =
+  'Scores use board-size weights (8×8 ×1 · 10×10 ×1.25 · 12×12 ×1.5). Bests reset for this scale.'

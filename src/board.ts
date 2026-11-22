@@ -1,68 +1,82 @@
 import { hashSeed, mulberry32 } from './prng.ts'
 
-export const GRID = 8
+/** Fixed round length so size tiers land on targets 1–3 / 4–6 / 7–10. */
+export const TARGETS_PER_ROUND = 10
+
+export type GridSize = 8 | 10 | 12
+
+/** Legacy default; prefer board.grid / gridForTargetIndex. */
+export const GRID: GridSize = 8
 export const CELL_COUNT = GRID * GRID
-export const BOARD_COUNT = 500
+
+export function gridForTargetIndex(targetIndex: number): GridSize {
+  if (targetIndex < 3) return 8
+  if (targetIndex < 6) return 10
+  return 12
+}
+
+export function scoreWeightForGrid(grid: number): number {
+  if (grid >= 12) return 1.5
+  if (grid >= 10) return 1.25
+  return 1
+}
+
+export function cellCountForGrid(grid: number): number {
+  return grid * grid
+}
 
 export type Board = number[]
 
 export interface PuzzleBoard {
+  grid: GridSize
   cells: Board
-  /** Digits 0–9 exactly once, shuffled from the puzzle seed. */
+  /** Exactly TARGETS_PER_ROUND ids, shuffled from the puzzle seed. */
   targets: number[]
+  /** ShapeFind only: ColorFind palette id per cell (distractor). */
+  cellColors?: number[]
 }
 
-function buildBoard(seed: number): PuzzleBoard {
-  const rand = mulberry32(hashSeed(seed ^ 0xa5a5a5a5))
-  const cells: Board = new Array(CELL_COUNT)
-
-  // Guarantee every digit 0–9 appears at least twice.
-  const guaranteed: number[] = []
-  for (let d = 0; d < 10; d++) {
-    guaranteed.push(d, d)
-  }
-  // Fill remaining slots with random digits.
-  while (guaranteed.length < CELL_COUNT) {
-    guaranteed.push(Math.floor(rand() * 10))
-  }
-  // Fisher–Yates shuffle.
-  for (let i = guaranteed.length - 1; i > 0; i--) {
+function shuffleInPlace<T>(arr: T[], rand: () => number): void {
+  for (let i = arr.length - 1; i > 0; i--) {
     const j = Math.floor(rand() * (i + 1))
-    ;[guaranteed[i], guaranteed[j]] = [guaranteed[j], guaranteed[i]]
+    ;[arr[i], arr[j]] = [arr[j]!, arr[i]!]
   }
-  for (let i = 0; i < CELL_COUNT; i++) {
-    cells[i] = guaranteed[i]!
-  }
-
-  // Every digit 0–9 appears; target order is shuffled from the puzzle seed.
-  const targets = shuffleTargets(seed)
-  return { cells, targets }
 }
 
 /** Deterministic Fisher–Yates of digits 0–9 from the puzzle id / seed. */
 export function shuffleTargets(puzzleId: number): number[] {
   const targets = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
   const rand = mulberry32(hashSeed(puzzleId ^ 0x71eeb10c))
-  for (let i = targets.length - 1; i > 0; i--) {
-    const j = Math.floor(rand() * (i + 1))
-    ;[targets[i], targets[j]] = [targets[j]!, targets[i]!]
-  }
+  shuffleInPlace(targets, rand)
   return targets
 }
 
-/** Pre-generated boards indexed by puzzle id 1..BOARD_COUNT (wraps). */
-const CACHE: Board[] = []
-for (let i = 0; i < BOARD_COUNT; i++) {
-  CACHE.push(buildBoard(i + 1).cells)
-}
+/**
+ * NumberFind board for a given grid. Same `?puzzle=` + grid → same cells.
+ * Pass `targets` to keep round order when the board grows mid-round.
+ */
+export function generateBoard(
+  puzzleId: number,
+  grid: GridSize = 8,
+  targets?: number[],
+): PuzzleBoard {
+  const count = cellCountForGrid(grid)
+  const rand = mulberry32(hashSeed(puzzleId ^ 0xa5a5a5a5 ^ (grid * 0x9e37)))
+  const cells: Board = new Array(count)
 
-export function generateBoard(puzzleId: number): PuzzleBoard {
-  const idx = ((puzzleId - 1) % BOARD_COUNT + BOARD_COUNT) % BOARD_COUNT
-  const cells = CACHE[idx]!.slice()
-  // Target order is derived from the actual puzzle id so ?puzzle=N is stable.
+  // Guarantee every digit 0–9 appears at least twice.
+  const bag: number[] = []
+  for (let d = 0; d < 10; d++) bag.push(d, d)
+  while (bag.length < count) {
+    bag.push(Math.floor(rand() * 10))
+  }
+  shuffleInPlace(bag, rand)
+  for (let i = 0; i < count; i++) cells[i] = bag[i]!
+
   return {
+    grid,
     cells,
-    targets: shuffleTargets(puzzleId),
+    targets: targets ?? shuffleTargets(puzzleId),
   }
 }
 

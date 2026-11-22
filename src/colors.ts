@@ -1,4 +1,4 @@
-import { CELL_COUNT, GRID } from './board.ts'
+import { TARGETS_PER_ROUND, cellCountForGrid, type GridSize } from './board.ts'
 import { hashSeed, mulberry32 } from './prng.ts'
 
 export type ConfusionGroup = 'red-green' | 'blue-purple' | 'green-brown' | 'neutral'
@@ -65,9 +65,17 @@ export const GROUP_LABEL: Record<ConfusionGroup, string> = {
 }
 
 export interface ColorBoard {
+  grid: GridSize
   cells: number[]
-  /** Color ids to clear, in order. */
+  /** Color ids to clear, in order (always TARGETS_PER_ROUND). */
   targets: number[]
+}
+
+function shuffleInPlace<T>(arr: T[], rand: () => number): void {
+  for (let i = arr.length - 1; i > 0; i--) {
+    const j = Math.floor(rand() * (i + 1))
+    ;[arr[i], arr[j]] = [arr[j]!, arr[i]!]
+  }
 }
 
 function pickPalette(puzzlesDone: number, rand: () => number): ColorDef[] {
@@ -81,20 +89,15 @@ function pickPalette(puzzlesDone: number, rand: () => number): ColorDef[] {
   const pool: ColorDef[] = []
   const take = (arr: ColorDef[], n: number) => {
     const copy = arr.slice()
-    for (let i = copy.length - 1; i > 0; i--) {
-      const j = Math.floor(rand() * (i + 1))
-      ;[copy[i], copy[j]] = [copy[j]!, copy[i]!]
-    }
+    shuffleInPlace(copy, rand)
     for (let i = 0; i < Math.min(n, copy.length); i++) {
       if (!pool.some((p) => p.id === copy[i]!.id)) pool.push(copy[i]!)
     }
   }
 
-  // Always start with clearly distinct hues.
   take(distinct, puzzlesDone <= 1 ? 8 : 5)
 
   if (puzzlesDone >= 1) {
-    // Bias toward one confusion family early, then mix.
     const families: ConfusionGroup[] = ['red-green', 'blue-purple', 'green-brown']
     const groups: ConfusionGroup[] =
       puzzlesDone < 3 ? [families[Math.floor(rand() * families.length)]!] : families
@@ -112,42 +115,47 @@ function pickPalette(puzzlesDone: number, rand: () => number): ColorDef[] {
     }
   }
 
-  // Cap palette size for the board.
-  const targetSize = Math.min(10, Math.max(6, 6 + Math.floor(puzzlesDone / 2)))
-  while (pool.length > targetSize) pool.pop()
-  while (pool.length < 6) {
+  // Exactly 10 targets per round for the 8→10→12 size tiers.
+  while (pool.length > TARGETS_PER_ROUND) pool.pop()
+  while (pool.length < TARGETS_PER_ROUND) {
     take(distinct, 1)
-    if (pool.length < 6) take(COLORS, 1)
+    if (pool.length < TARGETS_PER_ROUND) take(COLORS, 1)
   }
   return pool
 }
 
-export function generateColorBoard(puzzleId: number, puzzlesDone = 0): ColorBoard {
-  const rand = mulberry32(hashSeed(puzzleId ^ 0xc01f1d00 ^ (puzzlesDone * 997)))
+export function generateColorBoard(
+  puzzleId: number,
+  puzzlesDone = 0,
+  grid: GridSize = 8,
+  targets?: number[],
+): ColorBoard {
+  const rand = mulberry32(hashSeed(puzzleId ^ 0xc01f1d00 ^ (puzzlesDone * 997) ^ (grid * 0x51)))
   const palette = pickPalette(puzzlesDone, rand)
+  const count = cellCountForGrid(grid)
 
-  const cells: number[] = new Array(CELL_COUNT)
-  // Guarantee each palette color appears at least twice.
+  const resolvedTargets =
+    targets ??
+    (() => {
+      const tr = mulberry32(hashSeed(puzzleId ^ 0x7a51e ^ puzzlesDone))
+      const t = palette.map((c) => c.id)
+      shuffleInPlace(t, tr)
+      return t
+    })()
+
+  // Fill from the round's target colors (plus any extras already in palette).
+  const fillIds = Array.from(new Set([...resolvedTargets, ...palette.map((c) => c.id)]))
+
+  const cells: number[] = new Array(count)
   const bag: number[] = []
-  for (const c of palette) bag.push(c.id, c.id)
-  while (bag.length < CELL_COUNT) {
-    bag.push(palette[Math.floor(rand() * palette.length)]!.id)
+  for (const id of resolvedTargets) bag.push(id, id)
+  while (bag.length < count) {
+    bag.push(fillIds[Math.floor(rand() * fillIds.length)]!)
   }
-  for (let i = bag.length - 1; i > 0; i--) {
-    const j = Math.floor(rand() * (i + 1))
-    ;[bag[i], bag[j]] = [bag[j]!, bag[i]!]
-  }
-  for (let i = 0; i < CELL_COUNT; i++) cells[i] = bag[i]!
+  shuffleInPlace(bag, rand)
+  for (let i = 0; i < count; i++) cells[i] = bag[i]!
 
-  // Target order: shuffle palette ids from a separate stream.
-  const tr = mulberry32(hashSeed(puzzleId ^ 0x7a51e ^ puzzlesDone))
-  const targets = palette.map((c) => c.id)
-  for (let i = targets.length - 1; i > 0; i--) {
-    const j = Math.floor(tr() * (i + 1))
-    ;[targets[i], targets[j]] = [targets[j]!, targets[i]!]
-  }
-
-  return { cells, targets }
+  return { grid, cells, targets: resolvedTargets }
 }
 
 export function patternSymbol(pattern: PatternId): string {
@@ -170,5 +178,3 @@ export function patternSymbol(pattern: PatternId): string {
       return '≈'
   }
 }
-
-export { GRID, CELL_COUNT }
