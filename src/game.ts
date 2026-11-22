@@ -30,6 +30,16 @@ export interface GroupStat {
   timeMs: number
 }
 
+/** Per-target stats for the end-of-round summary (play order). */
+export interface TargetStat {
+  targetId: number
+  /** 1-based index in the round's target sequence. */
+  order: number
+  misses: number
+  timeMs: number
+  points: number
+}
+
 export interface GameState {
   mode: GameMode
   puzzleId: number
@@ -51,11 +61,19 @@ export interface GameState {
   highScore: number
   /** Best round score for the current puzzle seed in this mode. */
   puzzleBest: number
+  /** Puzzle-best score when this round started (for New best! detection). */
+  puzzleBestAtStart: number
   /** True when the latest bank beat overall or puzzle best. */
   justBeatBest: boolean
   status: GameStatus
   /** Color-mode confusion tracking for the current puzzle. */
   groupStats: Record<ConfusionGroup, GroupStat>
+  /** Finished targets this round, in play order. */
+  targetStats: TargetStat[]
+  /** Wrong taps on the active target (cleared when the target finishes). */
+  currentMisses: number
+  /** Accumulated active time on the current target (ms). */
+  currentTargetTimeMs: number
   /** performance.now() when the current target became active. */
   targetStartedAt: number
   patternAssist: boolean
@@ -184,6 +202,7 @@ function buildBoard(mode: GameMode, puzzleId: number, puzzlesDone: number): Puzz
 export function createGame(mode: GameMode, puzzleId = readPuzzleFromUrl()): GameState {
   const board = buildBoard(mode, puzzleId, 0)
   writePuzzleToUrl(puzzleId)
+  const puzzleBest = loadPuzzleBest(mode, puzzleId)
   return {
     mode,
     puzzleId,
@@ -196,10 +215,14 @@ export function createGame(mode: GameMode, puzzleId = readPuzzleFromUrl()): Game
     roundScore: 0,
     sessionScore: 0,
     highScore: loadHighScore(mode),
-    puzzleBest: loadPuzzleBest(mode, puzzleId),
+    puzzleBest,
+    puzzleBestAtStart: puzzleBest,
     justBeatBest: false,
     status: 'playing',
     groupStats: emptyGroupStats(),
+    targetStats: [],
+    currentMisses: 0,
+    currentTargetTimeMs: 0,
     targetStartedAt: performance.now(),
     patternAssist: false,
   }
@@ -223,18 +246,53 @@ export function remainingForTarget(state: GameState): number {
   return n
 }
 
+/** Restart the countdown for the same target (e.g. time expired). Keeps miss/time tallies. */
 export function startTargetTimer(state: GameState): void {
   state.timeLeft = timerBudget(state.puzzlesDone)
   state.clearedCurrent = new Set()
   state.targetStartedAt = performance.now()
 }
 
+/** Begin a fresh target: clear per-target tallies, then start the timer. */
+function beginTarget(state: GameState): void {
+  state.currentMisses = 0
+  state.currentTargetTimeMs = 0
+  startTargetTimer(state)
+}
+
 function accrueTargetTime(state: GameState): void {
-  if (state.mode !== 'color') return
-  const g = currentGroup(state)
   const dt = Math.max(0, performance.now() - state.targetStartedAt)
-  state.groupStats[g].timeMs += dt
+  state.currentTargetTimeMs += dt
+  if (state.mode === 'color') {
+    const g = currentGroup(state)
+    state.groupStats[g].timeMs += dt
+  }
   state.targetStartedAt = performance.now()
+}
+
+function finalizeTarget(state: GameState, points: number): void {
+  accrueTargetTime(state)
+  state.targetStats.push({
+    targetId: currentTarget(state),
+    order: state.targetStats.length + 1,
+    misses: state.currentMisses,
+    timeMs: state.currentTargetTimeMs,
+    points,
+  })
+  state.currentMisses = 0
+  state.currentTargetTimeMs = 0
+}
+
+/** Total active hunt time for the finished round (seconds). */
+export function roundTotalTimeSec(state: GameState): number {
+  let ms = 0
+  for (const t of state.targetStats) ms += t.timeMs
+  return ms / 1000
+}
+
+/** True when this round's score beat the puzzle best that existed at round start. */
+export function isNewPuzzleBest(state: GameState): boolean {
+  return state.roundScore > state.puzzleBestAtStart
 }
 
 /** Restore only cells of the current target that were cleared. */
@@ -288,9 +346,9 @@ export type TapResult =
   | {
       kind: 'puzzle-done'
       points: number
-      nextPuzzle: number
       newBest: boolean
       groupStats: Record<ConfusionGroup, GroupStat>
+      targetStats: TargetStat[]
     }
 
 export function tapCell(state: GameState, index: number): TapResult {
@@ -299,6 +357,7 @@ export function tapCell(state: GameState, index: number): TapResult {
 
   const t = currentTarget(state)
   if (state.board.cells[index] !== t) {
+    state.currentMisses++
     if (state.mode === 'color') {
       state.groupStats[currentGroup(state)].misses++
     }
@@ -316,24 +375,27 @@ export function tapCell(state: GameState, index: number): TapResult {
     return { kind: 'hit', remaining }
   }
 
-  accrueTargetTime(state)
-
   const points = Math.ceil(state.timeLeft)
+  finalizeTarget(state, points)
   state.roundScore += points
   state.sessionScore += points
   const newBest = recordScoreBests(state)
 
   if (state.targetIndex + 1 < state.board.targets.length) {
     state.targetIndex++
-    startTargetTimer(state)
+    beginTarget(state)
     return { kind: 'digit-done', points, newBest }
   }
 
   state.puzzlesDone++
   state.status = 'won'
-  const nextPuzzle = state.puzzleId + 1
-  const groupStats = state.groupStats
-  return { kind: 'puzzle-done', points, nextPuzzle, newBest, groupStats }
+  return {
+    kind: 'puzzle-done',
+    points,
+    newBest,
+    groupStats: state.groupStats,
+    targetStats: state.targetStats,
+  }
 }
 
 export function onTimerExpired(state: GameState): void {
@@ -367,9 +429,11 @@ export function restartCurrentPuzzle(state: GameState): void {
   state.roundScore = 0
   state.justBeatBest = false
   state.puzzleBest = loadPuzzleBest(state.mode, state.puzzleId)
+  state.puzzleBestAtStart = state.puzzleBest
   state.status = 'playing'
   state.groupStats = emptyGroupStats()
-  startTargetTimer(state)
+  state.targetStats = []
+  beginTarget(state)
 }
 
 export function advanceToPuzzle(state: GameState, puzzleId: number): void {
@@ -383,9 +447,11 @@ export function advanceToPuzzle(state: GameState, puzzleId: number): void {
   state.roundScore = 0
   state.justBeatBest = false
   state.puzzleBest = loadPuzzleBest(state.mode, puzzleId)
+  state.puzzleBestAtStart = state.puzzleBest
   state.status = 'playing'
   state.groupStats = emptyGroupStats()
-  startTargetTimer(state)
+  state.targetStats = []
+  beginTarget(state)
 }
 
 export function newRandomPuzzle(state: GameState): void {

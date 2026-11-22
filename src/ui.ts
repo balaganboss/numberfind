@@ -1,13 +1,9 @@
 import { GRID } from './board.ts'
+import { COLOR_BY_ID, patternSymbol } from './colors.ts'
 import {
-  COLOR_BY_ID,
-  patternSymbol,
-  type ConfusionGroup,
-} from './colors.ts'
-import {
-  advanceToPuzzle,
   createGame,
   currentTarget,
+  isNewPuzzleBest,
   MEDICAL_DISCLAIMER,
   newRandomPuzzle,
   onTimerExpired,
@@ -15,11 +11,12 @@ import {
   remainingForTarget,
   restartCurrentPuzzle,
   resumeGame,
+  roundTotalTimeSec,
   summarizeGroupStats,
   tapCell,
   timerBudget,
   type GameState,
-  type GroupStat,
+  type TargetStat,
 } from './game.ts'
 import { readModeFromUrl, writeModeToUrl, type GameMode } from './mode.ts'
 
@@ -141,11 +138,12 @@ function mountGame(root: HTMLElement, mode: GameMode): void {
           </div>
         </div>
         <div class="results-overlay" id="results-overlay" hidden>
-          <p class="results-title">Round results</p>
+          <p class="results-title">Round summary</p>
           <div class="results-body" id="results-body"></div>
-          <p class="results-disclaimer">${MEDICAL_DISCLAIMER}</p>
-          <div class="pause-actions">
-            <button type="button" class="btn btn-primary" id="results-continue">Next puzzle</button>
+          <p class="results-disclaimer" id="results-disclaimer" hidden>${MEDICAL_DISCLAIMER}</p>
+          <div class="pause-actions results-actions">
+            <button type="button" class="btn btn-primary" id="results-play-again">Play again</button>
+            <button type="button" class="btn" id="results-replay">Replay this puzzle</button>
           </div>
         </div>
       </div>
@@ -182,7 +180,9 @@ function mountGame(root: HTMLElement, mode: GameMode): void {
   const restartBtn = root.querySelector<HTMLButtonElement>('#restart-btn')!
   const resultsOverlay = root.querySelector<HTMLElement>('#results-overlay')!
   const resultsBody = root.querySelector<HTMLElement>('#results-body')!
-  const resultsContinue = root.querySelector<HTMLButtonElement>('#results-continue')!
+  const resultsDisclaimer = root.querySelector<HTMLElement>('#results-disclaimer')!
+  const resultsPlayAgain = root.querySelector<HTMLButtonElement>('#results-play-again')!
+  const resultsReplay = root.querySelector<HTMLButtonElement>('#results-replay')!
   const modeSwitch = root.querySelector<HTMLButtonElement>('#mode-switch')!
   const patternAssist = root.querySelector<HTMLInputElement>('#pattern-assist')!
 
@@ -192,7 +192,7 @@ function mountGame(root: HTMLElement, mode: GameMode): void {
   targetSwatchWrap.hidden = mode !== 'color'
 
   function setPausedUi(paused: boolean): void {
-    boardWrap.classList.toggle('is-paused', paused)
+    boardWrap.classList.toggle('is-paused', paused || resultsOpen)
     pauseOverlay.hidden = !paused || resultsOpen
     pauseBtn.textContent = paused ? 'Resume' : 'Pause'
     pauseBtn.setAttribute('aria-label', paused ? 'Resume' : 'Pause')
@@ -272,42 +272,86 @@ function mountGame(root: HTMLElement, mode: GameMode): void {
     hint.textContent = 'New best!'
   }
 
-  function showResults(stats: Record<ConfusionGroup, GroupStat>, nextPuzzle: number): void {
+  function targetLabel(targetId: number): string {
+    if (mode === 'color') return COLOR_BY_ID[targetId]?.name ?? `Color ${targetId}`
+    return String(targetId)
+  }
+
+  function wrongLabel(n: number): string {
+    return n === 1 ? '1 wrong' : `${n} wrong`
+  }
+
+  function showRoundSummary(targetStats: TargetStat[]): void {
     resultsOpen = true
-    const { insights, hardest } = summarizeGroupStats(stats)
+    deadlineMs = null
+    const newBest = isNewPuzzleBest(state)
+    const totalSec = roundTotalTimeSec(state)
     const lines: string[] = []
-    if (hardest && hardest.accuracy < 0.92) {
+
+    lines.push('<div class="results-scoreboard">')
+    lines.push(
+      `<div class="results-score-main"><span class="results-score-label">Round score</span><span class="results-score-value">${state.roundScore}</span></div>`,
+    )
+    lines.push(
+      `<div class="results-score-best${newBest ? ' is-new' : ''}"><span class="results-score-label">Best</span><span class="results-score-value">${state.puzzleBest}${newBest ? ' <em>New best!</em>' : ''}</span></div>`,
+    )
+    lines.push(
+      `<div class="results-score-total"><span class="results-score-label">Total time</span><span class="results-score-value">${totalSec.toFixed(1)}s</span></div>`,
+    )
+    lines.push('</div>')
+
+    lines.push('<p class="results-section-title">Per target</p>')
+    lines.push('<ul class="results-list results-targets">')
+    for (const t of targetStats) {
+      const sec = (t.timeMs / 1000).toFixed(1)
       lines.push(
-        `You found <strong>${hardest.label}</strong> shades harder than others.`,
+        `<li><span>${t.order}. ${targetLabel(t.targetId)}</span><span>${sec}s · ${wrongLabel(t.misses)}</span></li>`,
       )
-    } else if (hardest) {
-      lines.push(`Solid work across the board — ${hardest.label} was your closest call.`)
-    } else {
-      lines.push('Nice clear — keep hunting those swatches.')
     }
-    if (insights.length) {
-      lines.push('<ul class="results-list">')
-      for (const g of insights) {
-        const pct = Math.round(g.accuracy * 100)
+    lines.push('</ul>')
+
+    if (mode === 'color') {
+      const { insights, hardest } = summarizeGroupStats(state.groupStats)
+      lines.push('<p class="results-section-title">Shade groups</p>')
+      if (hardest && hardest.accuracy < 0.92) {
         lines.push(
-          `<li><span>${g.label}</span><span>${pct}% accuracy · ${g.timeSec.toFixed(1)}s</span></li>`,
+          `<p class="results-insight">You found <strong>${hardest.label}</strong> shades harder than others.</p>`,
         )
+      } else if (hardest) {
+        lines.push(
+          `<p class="results-insight">Solid work across the board — ${hardest.label} was your closest call.</p>`,
+        )
+      } else {
+        lines.push('<p class="results-insight">Nice clear — keep hunting those swatches.</p>')
       }
-      lines.push('</ul>')
+      if (insights.length) {
+        lines.push('<ul class="results-list">')
+        for (const g of insights) {
+          const pct = Math.round(g.accuracy * 100)
+          lines.push(
+            `<li><span>${g.label}</span><span>${pct}% accuracy · ${g.timeSec.toFixed(1)}s</span></li>`,
+          )
+        }
+        lines.push('</ul>')
+      }
+      resultsDisclaimer.hidden = false
+    } else {
+      resultsDisclaimer.hidden = true
     }
+
     resultsBody.innerHTML = lines.join('')
     resultsOverlay.hidden = false
     pauseOverlay.hidden = true
     boardWrap.classList.add('is-paused')
-    resultsContinue.onclick = () => {
-      resultsOpen = false
-      resultsOverlay.hidden = true
-      advanceToPuzzle(state, nextPuzzle)
-      syncDeadlineFromState()
-      renderBoard()
-      renderHud()
-      hint.textContent = 'New puzzle — find the target color.'
-    }
+    pauseBtn.disabled = true
+    hint.textContent = 'Round complete — pick Play again or Replay.'
+  }
+
+  function closeResults(): void {
+    resultsOpen = false
+    resultsOverlay.hidden = true
+    resultsDisclaimer.hidden = true
+    pauseBtn.disabled = false
   }
 
   function onTap(index: number): void {
@@ -343,22 +387,8 @@ function mountGame(root: HTMLElement, mode: GameMode): void {
       case 'puzzle-done':
         noteNewBest(result.newBest)
         deadlineMs = null
-        if (mode === 'color') {
-          showResults(result.groupStats, result.nextPuzzle)
-          renderHud()
-        } else {
-          if (!result.newBest) {
-            hint.textContent = `Puzzle clear! +${result.points}. Loading next…`
-          }
-          renderHud()
-          window.setTimeout(() => {
-            advanceToPuzzle(state, result.nextPuzzle)
-            syncDeadlineFromState()
-            renderBoard()
-            renderHud()
-            hint.textContent = 'New puzzle — find the target digit.'
-          }, 650)
-        }
+        showRoundSummary(result.targetStats)
+        renderHud()
         break
       default:
         break
@@ -393,12 +423,32 @@ function mountGame(root: HTMLElement, mode: GameMode): void {
   }
 
   function doRestart(): void {
-    resultsOpen = false
-    resultsOverlay.hidden = true
+    closeResults()
     restartCurrentPuzzle(state)
     syncDeadlineFromState()
     newBestUntil = 0
     hint.textContent = 'Puzzle restarted.'
+    renderBoard()
+    renderHud()
+  }
+
+  function doPlayAgain(): void {
+    closeResults()
+    newRandomPuzzle(state)
+    syncDeadlineFromState()
+    newBestUntil = 0
+    hint.textContent =
+      mode === 'color' ? 'New puzzle — find the target color.' : 'New puzzle — find the target digit.'
+    renderBoard()
+    renderHud()
+  }
+
+  function doReplayPuzzle(): void {
+    closeResults()
+    restartCurrentPuzzle(state)
+    syncDeadlineFromState()
+    newBestUntil = 0
+    hint.textContent = 'Same puzzle — go again.'
     renderBoard()
     renderHud()
   }
@@ -415,8 +465,7 @@ function mountGame(root: HTMLElement, mode: GameMode): void {
   })
 
   newBtn.addEventListener('click', () => {
-    resultsOpen = false
-    resultsOverlay.hidden = true
+    closeResults()
     newRandomPuzzle(state)
     syncDeadlineFromState()
     newBestUntil = 0
@@ -424,6 +473,9 @@ function mountGame(root: HTMLElement, mode: GameMode): void {
     renderBoard()
     renderHud()
   })
+
+  resultsPlayAgain.addEventListener('click', () => doPlayAgain())
+  resultsReplay.addEventListener('click', () => doReplayPuzzle())
 
   pauseBtn.addEventListener('pointerup', (e) => {
     if (e.pointerType === 'mouse' && e.button !== 0) return
