@@ -7,8 +7,15 @@ import {
   type Difficulty,
 } from './difficulty.ts'
 import {
+  dirsForDifficulty,
+  formatDigitTarget,
+  lineIndices,
+  stageRangeForTargetIndex,
+} from './digits.ts'
+import {
   createGame,
   currentTarget,
+  digitTargetLength,
   isNewPuzzleBest,
   MEDICAL_DISCLAIMER,
   newRandomPuzzle,
@@ -20,6 +27,7 @@ import {
   roundTotalTimeSec,
   SCORE_SCALE_NOTE,
   setDifficulty,
+  submitSelection,
   summarizeGroupStats,
   tapCell,
   timerBudget,
@@ -59,6 +67,10 @@ function showModePicker(root: HTMLElement): void {
         <button type="button" class="mode-card" data-mode="shape" id="mode-shape">
           <span class="mode-card-title">ShapeFind</span>
           <span class="mode-card-desc">Hunt matching shapes in any color — lookalikes sneak in later.</span>
+        </button>
+        <button type="button" class="mode-card" data-mode="digits" id="mode-digits">
+          <span class="mode-card-title">DigitsFind</span>
+          <span class="mode-card-desc">Drag to find hidden multi-digit numbers — word-search style.</span>
         </button>
       </div>
       <p class="hint">Puzzle seed stays in the URL. Scores are tracked per mode and difficulty.</p>
@@ -107,16 +119,24 @@ function mountGame(root: HTMLElement, mode: GameMode): void {
 
   const brandName = modeBrand(mode)
   const boardLabel =
-    mode === 'color' ? 'Color board' : mode === 'shape' ? 'Shape board' : 'Number board'
+    mode === 'color'
+      ? 'Color board'
+      : mode === 'shape'
+        ? 'Shape board'
+        : mode === 'digits'
+          ? 'Digit search board'
+          : 'Number board'
   const findHint =
     mode === 'color'
       ? 'Tap every matching color before time runs out.'
       : mode === 'shape'
         ? 'Tap every matching shape — any color counts.'
-        : 'Tap every matching digit before time runs out.'
+        : mode === 'digits'
+          ? 'Drag a straight line through each listed number.'
+          : 'Tap every matching digit before time runs out.'
 
   root.innerHTML = `
-    <div class="shell">
+    <div class="shell${mode === 'digits' ? ' shell-digits' : ''}">
       <header class="top">
         <div class="brand-row">
           <div class="brand">${brandName}</div>
@@ -140,7 +160,7 @@ function mountGame(root: HTMLElement, mode: GameMode): void {
 
       <section class="target-panel">
         <div class="target-play" id="target-play">
-          <div class="target-row">
+          <div class="target-row" id="target-row-tap" ${mode === 'digits' ? 'hidden' : ''}>
             <span class="target-label">Find</span>
             <span class="target-digit" id="target-digit">0</span>
             <span class="target-swatch-wrap" id="target-swatch-wrap" hidden>
@@ -155,6 +175,13 @@ function mountGame(root: HTMLElement, mode: GameMode): void {
               </span>
             </span>
             <span class="target-left" id="target-left"></span>
+          </div>
+          <div class="digits-list-wrap" id="digits-list-wrap" ${mode === 'digits' ? '' : 'hidden'}>
+            <div class="digits-list-head">
+              <span class="target-label">Find</span>
+              <span class="target-left" id="digits-left"></span>
+            </div>
+            <ul class="digits-list" id="digits-list" aria-label="Numbers to find"></ul>
           </div>
           <div class="timer-row">
             <div class="timer-track" aria-hidden="true">
@@ -221,6 +248,8 @@ function mountGame(root: HTMLElement, mode: GameMode): void {
   const targetShapeIcon = root.querySelector<HTMLElement>('#target-shape-icon')!
   const targetShapeName = root.querySelector<HTMLElement>('#target-shape-name')!
   const targetLeft = root.querySelector<HTMLElement>('#target-left')!
+  const digitsList = root.querySelector<HTMLElement>('#digits-list')!
+  const digitsLeft = root.querySelector<HTMLElement>('#digits-left')!
   const timerFill = root.querySelector<HTMLElement>('#timer-fill')!
   const timerText = root.querySelector<HTMLElement>('#timer-text')!
   const diffLabel = root.querySelector<HTMLElement>('#diff-label')!
@@ -257,12 +286,68 @@ function mountGame(root: HTMLElement, mode: GameMode): void {
   targetSwatchWrap.hidden = mode !== 'color'
   targetShapeWrap.hidden = mode !== 'shape'
 
+  let dragStart: number | null = null
+  let dragIndices: number[] = []
+  let dragPointerId: number | null = null
+  let scrollLocked = false
+
+  function lockPageScroll(lock: boolean): void {
+    if (lock === scrollLocked) return
+    scrollLocked = lock
+    document.documentElement.classList.toggle('digits-dragging', lock)
+    document.body.classList.toggle('digits-dragging', lock)
+  }
+
   function applyBoardChrome(): void {
     const g = state.board.grid
     boardEl.style.setProperty('--grid', String(g))
     boardEl.dataset.grid = String(g)
     boardEl.classList.toggle('board-color', mode === 'color')
     boardEl.classList.toggle('board-shape', mode === 'shape')
+    boardEl.classList.toggle('board-digits', mode === 'digits')
+  }
+
+  function clearDragHighlight(): void {
+    boardEl.querySelectorAll('.cell.is-selecting').forEach((el) => {
+      el.classList.remove('is-selecting')
+    })
+  }
+
+  function paintDragHighlight(indices: number[]): void {
+    clearDragHighlight()
+    for (const i of indices) {
+      const el = boardEl.querySelector<HTMLElement>(`.cell[data-index="${i}"]`)
+      el?.classList.add('is-selecting')
+    }
+  }
+
+  function flashWrongSelection(indices: number[]): void {
+    for (const i of indices) {
+      const el = boardEl.querySelector<HTMLElement>(`.cell[data-index="${i}"]`)
+      el?.classList.add('is-wrong')
+    }
+    window.setTimeout(() => {
+      boardEl.querySelectorAll('.cell.is-wrong').forEach((el) => el.classList.remove('is-wrong'))
+    }, 280)
+  }
+
+  function renderDigitsList(): void {
+    if (mode !== 'digits') return
+    const len = digitTargetLength(state)
+    const idx = Math.min(state.targetIndex, state.board.targets.length - 1)
+    const { start, end } = stageRangeForTargetIndex(idx)
+    digitsList.replaceChildren()
+    for (let i = start; i <= end; i++) {
+      const li = document.createElement('li')
+      li.className = 'digits-item'
+      const found = state.foundTargets.has(i)
+      if (found) li.classList.add('is-found')
+      li.textContent = formatDigitTarget(state.board.targets[i]!, len)
+      if (found) li.setAttribute('aria-label', `${li.textContent}, found`)
+      digitsList.appendChild(li)
+    }
+    const rem = remainingForTarget(state)
+    digitsLeft.textContent = `${rem} left`
   }
 
   function overlayBlocking(): boolean {
@@ -354,7 +439,13 @@ function mountGame(root: HTMLElement, mode: GameMode): void {
       const btn = document.createElement('button')
       btn.type = 'button'
       btn.className =
-        mode === 'color' ? 'cell cell-color' : mode === 'shape' ? 'cell cell-shape' : 'cell'
+        mode === 'color'
+          ? 'cell cell-color'
+          : mode === 'shape'
+            ? 'cell cell-shape'
+            : mode === 'digits'
+              ? 'cell cell-digits'
+              : 'cell'
       btn.dataset.index = String(i)
       const value = state.board.cells[i]!
       if (mode === 'color') {
@@ -385,7 +476,9 @@ function mountGame(root: HTMLElement, mode: GameMode): void {
       } else {
         btn.textContent = String(value)
       }
-      if (state.cleared.has(i)) {
+      if (mode === 'digits') {
+        if (state.foundCells.has(i)) btn.classList.add('is-found')
+      } else if (state.cleared.has(i)) {
         btn.classList.add('cleared')
         btn.disabled = true
       }
@@ -401,36 +494,40 @@ function mountGame(root: HTMLElement, mode: GameMode): void {
   }
 
   function renderHud(): void {
-    const t = currentTarget(state)
     const rem = remainingForTarget(state)
     const budget = timerBudget(state.puzzlesDone)
     const showNewBest = performance.now() < newBestUntil
     const weight = scoreWeightForGrid(state.board.grid)
-    if (mode === 'color') {
-      const def = COLOR_BY_ID[t]
-      targetSwatch.style.background = def?.hex ?? '#888'
-      targetColorName.textContent = def?.name ?? 'Color'
-      if (state.patternAssist && def) {
-        targetSwatch.dataset.pattern = def.pattern
-        targetSwatch.textContent = patternSymbol(def.pattern)
-      } else {
-        delete targetSwatch.dataset.pattern
-        targetSwatch.textContent = ''
-      }
-    } else if (mode === 'shape') {
-      const def = SHAPE_BY_ID[t]
-      targetShapeName.textContent = def ? `${def.glyph} ${def.name}` : 'Shape'
-      targetShapeIcon.innerHTML = def
-        ? shapeSvgMarkup(def, {
-            stroke: 'var(--accent)',
-            strokeWidth: 7,
-            className: 'target-shape-svg',
-          })
-        : ''
+    if (mode === 'digits') {
+      renderDigitsList()
     } else {
-      targetDigit.textContent = String(t)
+      const t = currentTarget(state)
+      if (mode === 'color') {
+        const def = COLOR_BY_ID[t]
+        targetSwatch.style.background = def?.hex ?? '#888'
+        targetColorName.textContent = def?.name ?? 'Color'
+        if (state.patternAssist && def) {
+          targetSwatch.dataset.pattern = def.pattern
+          targetSwatch.textContent = patternSymbol(def.pattern)
+        } else {
+          delete targetSwatch.dataset.pattern
+          targetSwatch.textContent = ''
+        }
+      } else if (mode === 'shape') {
+        const def = SHAPE_BY_ID[t]
+        targetShapeName.textContent = def ? `${def.glyph} ${def.name}` : 'Shape'
+        targetShapeIcon.innerHTML = def
+          ? shapeSvgMarkup(def, {
+              stroke: 'var(--accent)',
+              strokeWidth: 7,
+              className: 'target-shape-svg',
+            })
+          : ''
+      } else {
+        targetDigit.textContent = String(t)
+      }
+      targetLeft.textContent = `${rem} left`
     }
-    targetLeft.textContent = `${rem} left`
     diffLabel.textContent = difficultyLabel(state.difficulty)
     diffLabel.classList.toggle('pill-hard', state.difficulty === 'hard')
     puzzleLabel.textContent = `Puzzle ${state.puzzleId}`
@@ -468,11 +565,16 @@ function mountGame(root: HTMLElement, mode: GameMode): void {
     hint.textContent = 'New best!'
   }
 
-  function targetLabel(targetId: number): string {
+  function targetLabel(targetId: number, grid?: number): string {
     if (mode === 'color') return COLOR_BY_ID[targetId]?.name ?? `Color ${targetId}`
     if (mode === 'shape') {
       const def = SHAPE_BY_ID[targetId]
       return def ? `${def.glyph} ${def.name}` : `Shape ${targetId}`
+    }
+    if (mode === 'digits') {
+      const g = (grid ?? state.board.grid) as 8 | 10 | 12
+      const len = g <= 8 ? 4 : g <= 10 ? 5 : 6
+      return formatDigitTarget(targetId, len)
     }
     return String(targetId)
   }
@@ -514,7 +616,7 @@ function mountGame(root: HTMLElement, mode: GameMode): void {
     for (const t of targetStats) {
       const sec = (t.timeMs / 1000).toFixed(1)
       lines.push(
-        `<li><span>${t.order}. ${targetLabel(t.targetId)}</span><span>${t.grid}×${t.grid} · ${sec}s · ${wrongLabel(t.misses)}</span></li>`,
+        `<li><span>${t.order}. ${targetLabel(t.targetId, t.grid)}</span><span>${t.grid}×${t.grid} · ${sec}s · ${wrongLabel(t.misses)}</span></li>`,
       )
     }
     lines.push('</ul>')
@@ -563,6 +665,7 @@ function mountGame(root: HTMLElement, mode: GameMode): void {
   }
 
   function onTap(index: number): void {
+    if (mode === 'digits') return
     if (state.status !== 'playing' || overlayBlocking()) return
     const result = tapCell(state, index)
     switch (result.kind) {
@@ -618,6 +721,76 @@ function mountGame(root: HTMLElement, mode: GameMode): void {
     }
   }
 
+  function onDigitsSelect(indices: number[]): void {
+    if (state.status !== 'playing' || overlayBlocking()) return
+    const result = submitSelection(state, indices)
+    switch (result.kind) {
+      case 'miss':
+        hint.textContent = 'Not on the list — try another line.'
+        flashWrongSelection(indices)
+        flashMiss()
+        mascot.setMood('oops', { holdMs: 500 })
+        renderHud()
+        break
+      case 'hit':
+        noteNewBest(result.newBest)
+        if (result.leveledUp) {
+          hint.textContent = `Board grows to ${result.grid}×${result.grid}!`
+          mascot.setMood('cheer', { line: 'Level up!', holdMs: 900 })
+          syncDeadlineFromState()
+          renderBoard({ grow: true })
+          renderHud()
+        } else {
+          if (!result.newBest) {
+            hint.textContent = `+${result.points} — ${result.remaining} left on this board.`
+          }
+          mascot.setMood('cheer', { holdMs: 700 })
+          syncDeadlineFromState()
+          renderBoard()
+          renderHud()
+        }
+        break
+      case 'puzzle-done':
+        noteNewBest(result.newBest)
+        deadlineMs = null
+        renderBoard()
+        showRoundSummary(result.targetStats)
+        renderHud()
+        break
+      default:
+        break
+    }
+  }
+
+  function cellIndexFromPoint(clientX: number, clientY: number): number | null {
+    const el = document.elementFromPoint(clientX, clientY)
+    const cell = el?.closest?.('.cell') as HTMLElement | null | undefined
+    if (!cell || !boardEl.contains(cell)) return null
+    const index = Number(cell.dataset.index)
+    return Number.isFinite(index) ? index : null
+  }
+
+  function updateDragTo(index: number): void {
+    if (dragStart == null) return
+    const dirs = dirsForDifficulty(state.difficulty)
+    const line = lineIndices(state.board.grid, dragStart, index, dirs)
+    if (line) {
+      dragIndices = line
+      paintDragHighlight(line)
+    }
+  }
+
+  function endDrag(): void {
+    if (dragPointerId == null && dragStart == null) return
+    const indices = dragIndices.slice()
+    dragStart = null
+    dragIndices = []
+    dragPointerId = null
+    lockPageScroll(false)
+    clearDragHighlight()
+    if (indices.length >= 2) onDigitsSelect(indices)
+  }
+
   function enterPause(): boolean {
     if (overlayBlocking() || state.status !== 'playing') return false
     freezeTimeLeftFromDeadline()
@@ -655,8 +828,12 @@ function mountGame(root: HTMLElement, mode: GameMode): void {
     mascot.reset()
     hint.textContent =
       next === 'hard'
-        ? 'Hard — timer expire ends the round.'
-        : 'Easy — timer expire retries the target.'
+        ? mode === 'digits'
+          ? 'Hard — diagonals & backwards; timeout ends the round.'
+          : 'Hard — timer expire ends the round.'
+        : mode === 'digits'
+          ? 'Easy — across & down only; timeout retries.'
+          : 'Easy — timer expire retries the target.'
     renderBoard()
     renderHud()
   }
@@ -683,7 +860,9 @@ function mountGame(root: HTMLElement, mode: GameMode): void {
         ? 'New puzzle — find the target color.'
         : mode === 'shape'
           ? 'New puzzle — find the target shape.'
-          : 'New puzzle — find the target digit.'
+          : mode === 'digits'
+            ? 'New puzzle — drag to find each number.'
+            : 'New puzzle — find the target digit.'
     renderBoard()
     renderHud()
   }
@@ -699,16 +878,62 @@ function mountGame(root: HTMLElement, mode: GameMode): void {
     renderHud()
   }
 
-  boardEl.addEventListener('pointerup', (e) => {
-    if (state.status !== 'playing' || overlayBlocking()) return
-    if (e.pointerType === 'mouse' && e.button !== 0) return
-    const el = (e.target as HTMLElement).closest<HTMLElement>('.cell')
-    if (!el || el.classList.contains('cleared')) return
-    const index = Number(el.dataset.index)
-    if (!Number.isFinite(index)) return
-    e.preventDefault()
-    onTap(index)
-  })
+  if (mode === 'digits') {
+    boardEl.addEventListener('pointerdown', (e) => {
+      if (state.status !== 'playing' || overlayBlocking()) return
+      if (e.pointerType === 'mouse' && e.button !== 0) return
+      const el = (e.target as HTMLElement).closest<HTMLElement>('.cell')
+      if (!el) return
+      const index = Number(el.dataset.index)
+      if (!Number.isFinite(index)) return
+      e.preventDefault()
+      dragPointerId = e.pointerId
+      dragStart = index
+      dragIndices = [index]
+      lockPageScroll(true)
+      paintDragHighlight(dragIndices)
+      try {
+        boardEl.setPointerCapture(e.pointerId)
+      } catch {
+        /* ignore */
+      }
+    })
+
+    boardEl.addEventListener('pointermove', (e) => {
+      if (dragPointerId == null || e.pointerId !== dragPointerId) return
+      e.preventDefault()
+      const index = cellIndexFromPoint(e.clientX, e.clientY)
+      if (index == null) return
+      updateDragTo(index)
+    })
+
+    const finishPointer = (e: PointerEvent) => {
+      if (dragPointerId == null || e.pointerId !== dragPointerId) return
+      e.preventDefault()
+      const index = cellIndexFromPoint(e.clientX, e.clientY)
+      if (index != null) updateDragTo(index)
+      try {
+        boardEl.releasePointerCapture(e.pointerId)
+      } catch {
+        /* ignore */
+      }
+      endDrag()
+    }
+
+    boardEl.addEventListener('pointerup', finishPointer)
+    boardEl.addEventListener('pointercancel', finishPointer)
+  } else {
+    boardEl.addEventListener('pointerup', (e) => {
+      if (state.status !== 'playing' || overlayBlocking()) return
+      if (e.pointerType === 'mouse' && e.button !== 0) return
+      const el = (e.target as HTMLElement).closest<HTMLElement>('.cell')
+      if (!el || el.classList.contains('cleared')) return
+      const index = Number(el.dataset.index)
+      if (!Number.isFinite(index)) return
+      e.preventDefault()
+      onTap(index)
+    })
+  }
 
   newBtn.addEventListener('click', () => {
     closeResults()
@@ -803,7 +1028,9 @@ function mountGame(root: HTMLElement, mode: GameMode): void {
               ? 'Time up — find that color again.'
               : mode === 'shape'
                 ? 'Time up — find that shape again.'
-                : 'Time up — find that digit again.'
+                : mode === 'digits'
+                  ? 'Time up — keep hunting the list.'
+                  : 'Time up — find that digit again.'
           renderBoard()
           renderHud()
         }

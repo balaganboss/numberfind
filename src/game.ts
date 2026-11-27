@@ -13,6 +13,13 @@ import {
   type ConfusionGroup,
 } from './colors.ts'
 import type { Difficulty } from './difficulty.ts'
+import {
+  digitLengthForGrid,
+  generateDigitBoard,
+  selectionMatchesTarget,
+  shuffleDigitTargets,
+  stageRangeForTargetIndex,
+} from './digits.ts'
 import type { GameMode } from './mode.ts'
 import { mulberry32, hashSeed } from './prng.ts'
 import { generateShapeBoard } from './shapes.ts'
@@ -23,6 +30,7 @@ const MODE_PREFIX: Record<GameMode, string> = {
   number: 'numberfind',
   color: 'colorfind',
   shape: 'shapefind',
+  digits: 'digitsfind',
 }
 
 function hsKey(mode: GameMode, difficulty: Difficulty): string {
@@ -102,6 +110,10 @@ export interface GameState {
   /** performance.now() when the current target became active. */
   targetStartedAt: number
   patternAssist: boolean
+  /** DigitsFind: indices into board.targets that have been found this round. */
+  foundTargets: Set<number>
+  /** DigitsFind: cell indices that stay highlighted after a correct find. */
+  foundCells: Set<number>
 }
 
 function emptyGroupStats(): Record<ConfusionGroup, GroupStat> {
@@ -234,6 +246,7 @@ function buildBoard(
   puzzleId: number,
   puzzlesDone: number,
   grid: GridSize,
+  difficulty: Difficulty,
   targets?: number[],
 ): PuzzleBoard {
   if (mode === 'color') {
@@ -243,6 +256,13 @@ function buildBoard(
   if (mode === 'shape') {
     const b = generateShapeBoard(puzzleId, puzzlesDone, grid, targets)
     return { grid: b.grid, cells: b.cells, targets: b.targets, cellColors: b.cellColors }
+  }
+  if (mode === 'digits') {
+    const all = targets ?? shuffleDigitTargets(puzzleId)
+    const stageStart = grid <= 8 ? 0 : grid <= 10 ? 3 : 6
+    const stageEnd = grid <= 8 ? 2 : grid <= 10 ? 5 : 9
+    const stage = all.slice(stageStart, stageEnd + 1)
+    return generateDigitBoard(puzzleId, puzzlesDone, grid, difficulty, all, stage)
   }
   return generateBoard(puzzleId, grid, targets)
 }
@@ -256,10 +276,14 @@ export function resizeBoardForCurrentTarget(state: GameState): boolean {
     state.puzzleId,
     state.puzzlesDone,
     nextGrid,
+    state.difficulty,
     state.board.targets,
   )
   state.cleared = new Set()
   state.clearedCurrent = new Set()
+  if (state.mode === 'digits') {
+    state.foundCells = new Set()
+  }
   return true
 }
 
@@ -269,7 +293,7 @@ export function createGame(
   difficulty: Difficulty = 'easy',
 ): GameState {
   const grid = gridForTargetIndex(0)
-  const board = buildBoard(mode, puzzleId, 0, grid)
+  const board = buildBoard(mode, puzzleId, 0, grid, difficulty)
   writePuzzleToUrl(puzzleId)
   const puzzleBest = loadPuzzleBest(mode, difficulty, puzzleId)
   const highScore = loadHighScore(mode, difficulty)
@@ -298,6 +322,8 @@ export function createGame(
     currentTargetTimeMs: 0,
     targetStartedAt: performance.now(),
     patternAssist: false,
+    foundTargets: new Set(),
+    foundCells: new Set(),
   }
 }
 
@@ -311,12 +337,31 @@ export function currentGroup(state: GameState): ConfusionGroup {
 }
 
 export function remainingForTarget(state: GameState): number {
+  if (state.mode === 'digits') {
+    return unfoundStageIndices(state).length
+  }
   const t = currentTarget(state)
   let n = 0
   for (let i = 0; i < state.board.cells.length; i++) {
     if (state.board.cells[i] === t && !state.cleared.has(i)) n++
   }
   return n
+}
+
+/** DigitsFind: target indices still open on the current board stage. */
+export function unfoundStageIndices(state: GameState): number[] {
+  const { start, end } = stageRangeForTargetIndex(
+    Math.min(state.targetIndex, state.board.targets.length - 1),
+  )
+  const out: number[] = []
+  for (let i = start; i <= end; i++) {
+    if (!state.foundTargets.has(i)) out.push(i)
+  }
+  return out
+}
+
+export function digitTargetLength(state: GameState): number {
+  return digitLengthForGrid(state.board.grid)
 }
 
 /** Restart the countdown for the same target (e.g. time expired). Keeps miss/time tallies. */
@@ -442,6 +487,125 @@ export function pointsForClear(state: GameState): number {
   return Math.max(0, Math.ceil(state.timeLeft * weight))
 }
 
+export type SelectResult =
+  | { kind: 'ignore' }
+  | { kind: 'miss' }
+  | { kind: 'already' }
+  | {
+      kind: 'hit'
+      targetId: number
+      remaining: number
+      points: number
+      newBest: boolean
+      leveledUp: boolean
+      grid: GridSize
+      puzzleDone: false
+    }
+  | {
+      kind: 'puzzle-done'
+      targetId: number
+      points: number
+      newBest: boolean
+      groupStats: Record<ConfusionGroup, GroupStat>
+      targetStats: TargetStat[]
+    }
+
+/**
+ * DigitsFind: commit a drag-selected line. Matches any unfound stage target
+ * forward or reverse along the selection path.
+ */
+export function submitSelection(state: GameState, indices: number[]): SelectResult {
+  if (state.mode !== 'digits') return { kind: 'ignore' }
+  if (state.status !== 'playing') return { kind: 'already' }
+  if (indices.length < 2) return { kind: 'ignore' }
+
+  const len = digitTargetLength(state)
+  const open = unfoundStageIndices(state)
+  let matchedIndex: number | null = null
+  for (const ti of open) {
+    const targetId = state.board.targets[ti]!
+    if (selectionMatchesTarget(state.board.cells, indices, targetId, len)) {
+      matchedIndex = ti
+      break
+    }
+  }
+
+  if (matchedIndex == null) {
+    state.currentMisses++
+    return { kind: 'miss' }
+  }
+
+  if (state.foundTargets.has(matchedIndex)) return { kind: 'already' }
+
+  state.foundTargets.add(matchedIndex)
+  for (const i of indices) state.foundCells.add(i)
+
+  const targetId = state.board.targets[matchedIndex]!
+  const points = pointsForClear(state)
+  accrueTargetTime(state)
+  state.targetStats.push({
+    targetId,
+    order: state.targetStats.length + 1,
+    misses: state.currentMisses,
+    timeMs: state.currentTargetTimeMs,
+    points,
+    grid: state.board.grid,
+  })
+  state.currentMisses = 0
+  state.currentTargetTimeMs = 0
+
+  const { start, end } = stageRangeForTargetIndex(matchedIndex)
+  let remainingInStage = 0
+  for (let i = start; i <= end; i++) {
+    if (!state.foundTargets.has(i)) remainingInStage++
+  }
+
+  state.targetIndex = state.foundTargets.size
+  state.roundScore += points
+  state.sessionScore += points
+  const newBest = recordScoreBests(state)
+
+  if (remainingInStage > 0) {
+    beginTarget(state)
+    return {
+      kind: 'hit',
+      targetId,
+      remaining: remainingInStage,
+      points,
+      newBest,
+      leveledUp: false,
+      grid: state.board.grid,
+      puzzleDone: false,
+    }
+  }
+
+  if (state.targetIndex < state.board.targets.length) {
+    const leveledUp = resizeBoardForCurrentTarget(state)
+    beginTarget(state)
+    return {
+      kind: 'hit',
+      targetId,
+      remaining: unfoundStageIndices(state).length,
+      points,
+      newBest,
+      leveledUp,
+      grid: state.board.grid,
+      puzzleDone: false,
+    }
+  }
+
+  state.puzzlesDone++
+  state.status = 'won'
+  return {
+    kind: 'puzzle-done',
+    targetId,
+    points,
+    newBest,
+    groupStats: state.groupStats,
+    targetStats: state.targetStats,
+  }
+}
+
 export function tapCell(state: GameState, index: number): TapResult {
   if (state.status !== 'playing') return { kind: 'already' }
   if (state.cleared.has(index)) return { kind: 'already' }
@@ -528,9 +692,17 @@ export function failHardRound(state: GameState): void {
   state.justBeatBest = false
 
   const grid = gridForTargetIndex(0)
-  state.board = buildBoard(state.mode, state.puzzleId, state.puzzlesDone, grid)
+  state.board = buildBoard(
+    state.mode,
+    state.puzzleId,
+    state.puzzlesDone,
+    grid,
+    state.difficulty,
+  )
   state.cleared = new Set()
   state.clearedCurrent = new Set()
+  state.foundTargets = new Set()
+  state.foundCells = new Set()
   state.targetIndex = 0
   state.timeLeft = 0
   state.groupStats = emptyGroupStats()
@@ -570,23 +742,33 @@ function beginRound(state: GameState): void {
 /** Restart the current puzzle seed; keep session score / puzzlesDone. */
 export function restartCurrentPuzzle(state: GameState): void {
   const grid = gridForTargetIndex(0)
-  const board = buildBoard(state.mode, state.puzzleId, state.puzzlesDone, grid)
+  const board = buildBoard(
+    state.mode,
+    state.puzzleId,
+    state.puzzlesDone,
+    grid,
+    state.difficulty,
+  )
   writePuzzleToUrl(state.puzzleId)
   state.board = board
   state.cleared = new Set()
   state.clearedCurrent = new Set()
+  state.foundTargets = new Set()
+  state.foundCells = new Set()
   state.targetIndex = 0
   beginRound(state)
 }
 
 export function advanceToPuzzle(state: GameState, puzzleId: number): void {
   const grid = gridForTargetIndex(0)
-  const board = buildBoard(state.mode, puzzleId, state.puzzlesDone, grid)
+  const board = buildBoard(state.mode, puzzleId, state.puzzlesDone, grid, state.difficulty)
   writePuzzleToUrl(puzzleId)
   state.puzzleId = puzzleId
   state.board = board
   state.cleared = new Set()
   state.clearedCurrent = new Set()
+  state.foundTargets = new Set()
+  state.foundCells = new Set()
   state.targetIndex = 0
   beginRound(state)
 }

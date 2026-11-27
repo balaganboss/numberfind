@@ -1,24 +1,30 @@
 # NumberFind
 
-Mobile-first digit-hunt puzzle. Clear every instance of the target digit before the timer runs out, then move to the next digit (0–9).
+Mobile-first hunt puzzles. Pick a mode from the home picker (or `?mode=`).
 
 ## Play
 
-Open the site with an optional puzzle seed:
-
 ```
-/?puzzle=1
+/?mode=number&puzzle=1
+/?mode=color&puzzle=1
+/?mode=shape&puzzle=1
+/?mode=digits&puzzle=1
 ```
 
-Same `?puzzle=` value always loads the same board.
+Same `?puzzle=` value always loads the same board for that mode. `?difficulty=easy|hard` sets Easy/Hard.
 
-## Rules
+## Modes
 
-- **Target digits** — every digit 0–9 exactly once per round, shuffled from the puzzle seed (same `?puzzle=` → same order).
-- **Timer** — 45s base per digit; +2s every 5 puzzles completed.
-- **Timeout** — only the current digit’s cleared cells are restored; find that digit again.
-- **Wrong tap** — restores found cells of the current target and scrambles the remaining ones.
-- **Score** — banking `ceil(seconds left)` when you finish a digit. High score is saved in `localStorage`.
+- **NumberFind** (`number`) — tap every instance of the target digit.
+- **ColorFind** (`color`) — tap matching color swatches.
+- **ShapeFind** (`shape`) — tap matching shapes (any color).
+- **DigitsFind** (`digits`) — drag-select hidden 4–6 digit numbers (word-search style). Easy: across & down only. Hard: diagonals + backwards. Listed numbers cross off when found; board grows 8→10→12.
+
+## Shared rules
+
+- **Timer** — 45s base per target; +2s every 5 puzzles completed.
+- **Easy timeout** — retry the current hunt; Hard timeout fails/resets the round.
+- **Score** — bank weighted time left when you clear a target. Bests are per mode + difficulty in `localStorage`.
 
 ## Develop
 

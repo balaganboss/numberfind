@@ -207,6 +207,13 @@ body {
   min-width: 0;
 }
 
+.target-row[hidden],
+.target-swatch-wrap[hidden],
+.target-shape-wrap[hidden],
+.digits-list-wrap[hidden] {
+  display: none !important;
+}
+
 .target-label {
   color: var(--muted);
   font-size: 0.9rem;
@@ -1278,4 +1285,105 @@ body {
   .mascot[data-mood='celebrate'] .mascot-figure {
     transform: translateY(-3px);
   }
+}
+
+/* —— DigitsFind —— */
+html.digits-dragging,
+html.digits-dragging body,
+body.digits-dragging {
+  overflow: hidden !important;
+  overscroll-behavior: none;
+  touch-action: none;
+}
+
+.board.board-digits {
+  touch-action: none;
+  gap: 4px;
+}
+
+.cell.cell-digits {
+  touch-action: none;
+  cursor: crosshair;
+  font-variant-numeric: tabular-nums;
+}
+
+.cell.cell-digits.is-selecting {
+  background: rgba(61, 214, 198, 0.35);
+  border-color: rgba(61, 214, 198, 0.75);
+  transform: scale(0.96);
+}
+
+.cell.cell-digits.is-found {
+  background: rgba(61, 214, 198, 0.22);
+  border-color: rgba(61, 214, 198, 0.55);
+  color: var(--accent);
+}
+
+.cell.cell-digits.is-wrong {
+  background: rgba(255, 107, 122, 0.35);
+  border-color: rgba(255, 107, 122, 0.7);
+  animation: digits-wrong-flash 0.28s ease;
+}
+
+@keyframes digits-wrong-flash {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  40% {
+    opacity: 0.55;
+  }
+}
+
+.digits-list-wrap {
+  grid-area: target;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 4px;
+  min-width: 0;
+}
+
+.digits-list-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.digits-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.digits-item {
+  font-family: var(--mono);
+  font-size: clamp(0.95rem, 3.6vw, 1.15rem);
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  padding: 6px 10px;
+  border-radius: 10px;
+  border: 1px solid var(--line);
+  background: rgba(12, 18, 34, 0.65);
+  color: var(--text);
+  min-width: 4.5em;
+  text-align: center;
+}
+
+.digits-item.is-found {
+  color: var(--muted);
+  text-decoration: line-through;
+  text-decoration-thickness: 2px;
+  opacity: 0.55;
+  border-color: rgba(61, 214, 198, 0.25);
+}
+
+.board[data-grid='10'] .cell-digits,
+.board[data-grid='12'] .cell-digits {
+  font-size: clamp(0.78rem, 3.2vw, 1.05rem);
+  border-radius: 8px;
 }
