@@ -3,6 +3,8 @@ import { COLOR_BY_ID, patternSymbol } from './colors.ts'
 import {
   applyDifficulty,
   difficultyLabel,
+  isReshuffleDifficulty,
+  RESHUFFLE_WARN_SEC,
   resolveDifficulty,
   type Difficulty,
 } from './difficulty.ts'
@@ -22,6 +24,7 @@ import {
   onTimerExpired,
   pauseGame,
   remainingForTarget,
+  reshuffleBoard,
   restartCurrentPuzzle,
   resumeGame,
   roundTotalTimeSec,
@@ -97,6 +100,9 @@ function mountGame(root: HTMLElement, mode: GameMode): void {
   applyDifficulty(initialDifficulty)
   let state: GameState = createGame(mode, undefined, initialDifficulty)
   let deadlineMs: number | null = performance.now() + state.timeLeft * 1000
+  let reshuffleDeadlineMs: number | null = isReshuffleDifficulty(state.difficulty)
+    ? performance.now() + state.reshuffleLeft * 1000
+    : null
   let raf = 0
   let newBestUntil = 0
   let pauseLatchUntil = 0
@@ -109,12 +115,27 @@ function mountGame(root: HTMLElement, mode: GameMode): void {
     } else {
       deadlineMs = null
     }
+    syncReshuffleDeadlineFromState()
+  }
+
+  function syncReshuffleDeadlineFromState(): void {
+    if (isReshuffleDifficulty(state.difficulty) && state.status === 'playing') {
+      reshuffleDeadlineMs = performance.now() + Math.max(0, state.reshuffleLeft) * 1000
+    } else {
+      reshuffleDeadlineMs = null
+    }
   }
 
   function freezeTimeLeftFromDeadline(): void {
     if (deadlineMs == null) return
     state.timeLeft = Math.max(0, (deadlineMs - performance.now()) / 1000)
     deadlineMs = null
+  }
+
+  function freezeReshuffleFromDeadline(): void {
+    if (reshuffleDeadlineMs == null) return
+    state.reshuffleLeft = Math.max(0, (reshuffleDeadlineMs - performance.now()) / 1000)
+    reshuffleDeadlineMs = null
   }
 
   const brandName = modeBrand(mode)
@@ -144,6 +165,7 @@ function mountGame(root: HTMLElement, mode: GameMode): void {
             <div class="difficulty-picker" role="group" aria-label="Difficulty">
               <button type="button" class="diff-btn" data-diff="easy" id="diff-easy">Easy</button>
               <button type="button" class="diff-btn" data-diff="hard" id="diff-hard">Hard</button>
+              <button type="button" class="diff-btn" data-diff="expert" id="diff-expert">Expert</button>
             </div>
             <button type="button" class="mode-switch" id="mode-switch" aria-label="Switch mode">Modes</button>
           </div>
@@ -190,6 +212,7 @@ function mountGame(root: HTMLElement, mode: GameMode): void {
             <button type="button" class="pause-btn" id="pause-btn" aria-label="Pause">Pause</button>
           </div>
           <div class="timer-text" id="timer-text">45.0s</div>
+          <div class="reshuffle-banner" id="reshuffle-banner" hidden aria-live="polite"></div>
         </div>
         <div class="target-done" id="target-done" hidden>
           <p class="target-done-title" id="target-done-title">Round complete</p>
@@ -278,6 +301,8 @@ function mountGame(root: HTMLElement, mode: GameMode): void {
   const modeSwitch = root.querySelector<HTMLButtonElement>('#mode-switch')!
   const diffEasyBtn = root.querySelector<HTMLButtonElement>('#diff-easy')!
   const diffHardBtn = root.querySelector<HTMLButtonElement>('#diff-hard')!
+  const diffExpertBtn = root.querySelector<HTMLButtonElement>('#diff-expert')!
+  const reshuffleBanner = root.querySelector<HTMLElement>('#reshuffle-banner')!
   const patternAssist = root.querySelector<HTMLInputElement>('#pattern-assist')!
   const mascotSlot = root.querySelector<HTMLElement>('#mascot-slot')!
   const mascot = mountMascot(mascotSlot)
@@ -357,8 +382,10 @@ function mountGame(root: HTMLElement, mode: GameMode): void {
   function syncDiffButtons(): void {
     diffEasyBtn.classList.toggle('is-active', state.difficulty === 'easy')
     diffHardBtn.classList.toggle('is-active', state.difficulty === 'hard')
+    diffExpertBtn.classList.toggle('is-active', state.difficulty === 'expert')
     diffEasyBtn.setAttribute('aria-pressed', state.difficulty === 'easy' ? 'true' : 'false')
     diffHardBtn.setAttribute('aria-pressed', state.difficulty === 'hard' ? 'true' : 'false')
+    diffExpertBtn.setAttribute('aria-pressed', state.difficulty === 'expert' ? 'true' : 'false')
   }
 
   function setPausedUi(paused: boolean): void {
@@ -530,6 +557,7 @@ function mountGame(root: HTMLElement, mode: GameMode): void {
     }
     diffLabel.textContent = difficultyLabel(state.difficulty)
     diffLabel.classList.toggle('pill-hard', state.difficulty === 'hard')
+    diffLabel.classList.toggle('pill-expert', state.difficulty === 'expert')
     puzzleLabel.textContent = `Puzzle ${state.puzzleId}`
     gridLabel.textContent =
       weight === 1
@@ -543,6 +571,20 @@ function mountGame(root: HTMLElement, mode: GameMode): void {
     timerFill.style.transform = `scaleX(${pct})`
     timerFill.classList.toggle('urgent', state.timeLeft <= 8)
     timerText.textContent = `${state.timeLeft.toFixed(1)}s`
+
+    const expert = isReshuffleDifficulty(state.difficulty)
+    const warn =
+      expert &&
+      !overlayBlocking() &&
+      (state.status === 'playing' || state.status === 'paused') &&
+      state.reshuffleLeft <= RESHUFFLE_WARN_SEC
+    reshuffleBanner.hidden = !warn
+    if (warn) {
+      const secs = Math.max(1, Math.ceil(state.reshuffleLeft))
+      reshuffleBanner.textContent = `Shuffle in ${secs}…`
+    }
+    boardWrap.classList.toggle('is-reshuffle-warn', warn && state.status === 'playing')
+
     setPausedUi(state.status === 'paused')
     syncDiffButtons()
     const searching =
@@ -791,9 +833,40 @@ function mountGame(root: HTMLElement, mode: GameMode): void {
     if (indices.length >= 2) onDigitsSelect(indices)
   }
 
+  /** Cancel an in-progress DigitsFind drag without submitting (e.g. on reshuffle). */
+  function cancelDrag(): void {
+    if (dragPointerId == null && dragStart == null) return
+    dragStart = null
+    dragIndices = []
+    dragPointerId = null
+    lockPageScroll(false)
+    clearDragHighlight()
+  }
+
+  function flashReshuffle(): void {
+    boardWrap.classList.remove('is-reshuffling')
+    void boardWrap.offsetWidth
+    boardWrap.classList.add('is-reshuffling')
+    window.setTimeout(() => boardWrap.classList.remove('is-reshuffling'), 480)
+  }
+
+  function runReshuffle(): void {
+    cancelDrag()
+    if (!reshuffleBoard(state)) return
+    flashReshuffle()
+    syncReshuffleDeadlineFromState()
+    hint.textContent =
+      mode === 'digits'
+        ? 'Board shuffled — found numbers stay locked.'
+        : 'Board shuffled — found cells stay locked.'
+    renderBoard()
+    renderHud()
+  }
+
   function enterPause(): boolean {
     if (overlayBlocking() || state.status !== 'playing') return false
     freezeTimeLeftFromDeadline()
+    freezeReshuffleFromDeadline()
     if (!pauseGame(state)) return false
     hint.textContent = 'Paused — board hidden.'
     renderHud()
@@ -818,28 +891,39 @@ function mountGame(root: HTMLElement, mode: GameMode): void {
     else if (state.status === 'playing') enterPause()
   }
 
+  function difficultyHint(next: Difficulty): string {
+    if (next === 'expert') {
+      return mode === 'digits'
+        ? 'Expert — board shuffles every 10s; diagonals & backwards; timeout ends the round.'
+        : 'Expert — board shuffles every 10s; timeout ends the round.'
+    }
+    if (next === 'hard') {
+      return mode === 'digits'
+        ? 'Hard — diagonals & backwards; timeout ends the round.'
+        : 'Hard — timer expire ends the round.'
+    }
+    return mode === 'digits'
+      ? 'Easy — across & down only; timeout retries.'
+      : 'Easy — timer expire retries the target.'
+  }
+
   function changeDifficulty(next: Difficulty): void {
     if (state.difficulty === next) return
     closeResults()
+    cancelDrag()
     applyDifficulty(next)
     setDifficulty(state, next)
     syncDeadlineFromState()
     newBestUntil = 0
     mascot.reset()
-    hint.textContent =
-      next === 'hard'
-        ? mode === 'digits'
-          ? 'Hard — diagonals & backwards; timeout ends the round.'
-          : 'Hard — timer expire ends the round.'
-        : mode === 'digits'
-          ? 'Easy — across & down only; timeout retries.'
-          : 'Easy — timer expire retries the target.'
+    hint.textContent = difficultyHint(next)
     renderBoard()
     renderHud()
   }
 
   function doRestart(): void {
     closeResults()
+    cancelDrag()
     restartCurrentPuzzle(state)
     syncDeadlineFromState()
     newBestUntil = 0
@@ -952,6 +1036,7 @@ function mountGame(root: HTMLElement, mode: GameMode): void {
 
   diffEasyBtn.addEventListener('click', () => changeDifficulty('easy'))
   diffHardBtn.addEventListener('click', () => changeDifficulty('hard'))
+  diffExpertBtn.addEventListener('click', () => changeDifficulty('expert'))
 
   pauseBtn.addEventListener('pointerup', (e) => {
     if (e.pointerType === 'mouse' && e.button !== 0) return
@@ -1013,11 +1098,24 @@ function mountGame(root: HTMLElement, mode: GameMode): void {
     if (state.status === 'playing' && !overlayBlocking()) {
       if (deadlineMs == null) syncDeadlineFromState()
       state.timeLeft = Math.max(0, ((deadlineMs ?? ts) - ts) / 1000)
+
+      if (isReshuffleDifficulty(state.difficulty)) {
+        if (reshuffleDeadlineMs == null) syncReshuffleDeadlineFromState()
+        state.reshuffleLeft = Math.max(0, ((reshuffleDeadlineMs ?? ts) - ts) / 1000)
+        if (state.reshuffleLeft <= 0 && state.timeLeft > 0) {
+          state.reshuffleLeft = 0
+          runReshuffle()
+        }
+      }
+
       if (state.timeLeft <= 0) {
         state.timeLeft = 0
+        freezeReshuffleFromDeadline()
         const expired = onTimerExpired(state)
         if (expired.kind === 'failed') {
           deadlineMs = null
+          reshuffleDeadlineMs = null
+          cancelDrag()
           setFailUi(true)
           renderBoard()
           renderHud()
@@ -1038,7 +1136,7 @@ function mountGame(root: HTMLElement, mode: GameMode): void {
         renderHud()
       }
     } else if (state.status === 'paused') {
-      if (newBestUntil > 0) renderHud()
+      if (newBestUntil > 0 || isReshuffleDifficulty(state.difficulty)) renderHud()
     }
     raf = requestAnimationFrame(tick)
   }

@@ -12,10 +12,16 @@ import {
   GROUP_LABEL,
   type ConfusionGroup,
 } from './colors.ts'
-import type { Difficulty } from './difficulty.ts'
+import {
+  isFailOnTimeout,
+  isReshuffleDifficulty,
+  reshuffleIntervalSec,
+  type Difficulty,
+} from './difficulty.ts'
 import {
   digitLengthForGrid,
   generateDigitBoard,
+  reshuffleDigitBoard,
   selectionMatchesTarget,
   shuffleDigitTargets,
   stageRangeForTargetIndex,
@@ -33,14 +39,18 @@ const MODE_PREFIX: Record<GameMode, string> = {
   digits: 'digitsfind',
 }
 
+function difficultySuffix(difficulty: Difficulty): string {
+  if (difficulty === 'hard') return '-hard'
+  if (difficulty === 'expert') return '-expert'
+  return ''
+}
+
 function hsKey(mode: GameMode, difficulty: Difficulty): string {
-  const base = `${MODE_PREFIX[mode]}-highscore-${BESTS_VERSION}`
-  return difficulty === 'hard' ? `${base}-hard` : base
+  return `${MODE_PREFIX[mode]}-highscore-${BESTS_VERSION}${difficultySuffix(difficulty)}`
 }
 
 function puzzleBestKey(mode: GameMode, difficulty: Difficulty): string {
-  const base = `${MODE_PREFIX[mode]}-puzzle-bests-${BESTS_VERSION}`
-  return difficulty === 'hard' ? `${base}-hard` : base
+  return `${MODE_PREFIX[mode]}-puzzle-bests-${BESTS_VERSION}${difficultySuffix(difficulty)}`
 }
 
 const BASE_TIMER = 45
@@ -114,6 +124,10 @@ export interface GameState {
   foundTargets: Set<number>
   /** DigitsFind: cell indices that stay highlighted after a correct find. */
   foundCells: Set<number>
+  /** Expert: how many board regenerations this round (feeds reshuffle seed). */
+  reshuffleCount: number
+  /** Expert: seconds until the next board regeneration. */
+  reshuffleLeft: number
 }
 
 function emptyGroupStats(): Record<ConfusionGroup, GroupStat> {
@@ -284,6 +298,8 @@ export function resizeBoardForCurrentTarget(state: GameState): boolean {
   if (state.mode === 'digits') {
     state.foundCells = new Set()
   }
+  // Fresh board size — give a full reshuffle window.
+  state.reshuffleLeft = reshuffleIntervalSec()
   return true
 }
 
@@ -324,7 +340,79 @@ export function createGame(
     patternAssist: false,
     foundTargets: new Set(),
     foundCells: new Set(),
+    reshuffleCount: 0,
+    reshuffleLeft: reshuffleIntervalSec(),
   }
+}
+
+function resetReshuffleClock(state: GameState): void {
+  state.reshuffleCount = 0
+  state.reshuffleLeft = reshuffleIntervalSec()
+}
+
+function shuffleInPlace<T>(arr: T[], rand: () => number): void {
+  for (let i = arr.length - 1; i > 0; i--) {
+    const j = Math.floor(rand() * (i + 1))
+    ;[arr[i], arr[j]] = [arr[j]!, arr[i]!]
+  }
+}
+
+/**
+ * Expert tap-modes: keep cleared cells locked; permute unlocked cells
+ * (and shape colors) with a seed from puzzleId + reshuffleCount.
+ */
+function reshuffleTapBoard(state: GameState): void {
+  const locked = state.cleared
+  const unlocked: number[] = []
+  for (let i = 0; i < state.board.cells.length; i++) {
+    if (!locked.has(i)) unlocked.push(i)
+  }
+  if (unlocked.length < 2) return
+
+  const seed = hashSeed(
+    state.puzzleId ^ (state.reshuffleCount * 0x9e3779b9) ^ (state.board.grid * 0x51) ^ 0xe51f0,
+  )
+  const rand = mulberry32(seed)
+  const values = unlocked.map((i) => state.board.cells[i]!)
+  shuffleInPlace(values, rand)
+  for (let i = 0; i < unlocked.length; i++) {
+    state.board.cells[unlocked[i]!] = values[i]!
+  }
+
+  const colors = state.board.cellColors
+  if (colors) {
+    const colorVals = unlocked.map((i) => colors[i]!)
+    shuffleInPlace(colorVals, rand)
+    for (let i = 0; i < unlocked.length; i++) {
+      colors[unlocked[i]!] = colorVals[i]!
+    }
+  }
+}
+
+/**
+ * Expert: regenerate the board while locking found cells/targets.
+ * Returns true when a reshuffle ran. Callers should cancel in-progress
+ * DigitsFind drags and flash the board.
+ */
+export function reshuffleBoard(state: GameState): boolean {
+  if (!isReshuffleDifficulty(state.difficulty)) return false
+  if (state.status !== 'playing') return false
+
+  state.reshuffleCount++
+  if (state.mode === 'digits') {
+    state.board = reshuffleDigitBoard(
+      state.puzzleId,
+      state.board,
+      state.difficulty,
+      state.foundCells,
+      state.foundTargets,
+      state.reshuffleCount,
+    )
+  } else {
+    reshuffleTapBoard(state)
+  }
+  state.reshuffleLeft = reshuffleIntervalSec()
+  return true
 }
 
 export function currentTarget(state: GameState): number {
@@ -664,10 +752,10 @@ export type TimerExpireResult = { kind: 'retry' } | { kind: 'failed' }
 
 /**
  * Easy: restore current target and restart the countdown.
- * Hard: fail the round — revert score to 0 / target 1 / 8×8.
+ * Hard/Expert: fail the round — revert score to 0 / target 1 / 8×8.
  */
 export function onTimerExpired(state: GameState): TimerExpireResult {
-  if (state.difficulty === 'hard') {
+  if (isFailOnTimeout(state.difficulty)) {
     failHardRound(state)
     return { kind: 'failed' }
   }
@@ -677,7 +765,7 @@ export function onTimerExpired(state: GameState): TimerExpireResult {
   return { kind: 'retry' }
 }
 
-/** Hard timeout: roll back this round's points/bests and reset to target 1 / 8×8. */
+/** Hard/Expert timeout: roll back this round's points/bests and reset to target 1 / 8×8. */
 export function failHardRound(state: GameState): void {
   state.sessionScore = state.sessionScoreAtRoundStart
   state.roundScore = 0
@@ -709,6 +797,7 @@ export function failHardRound(state: GameState): void {
   state.targetStats = []
   state.currentMisses = 0
   state.currentTargetTimeMs = 0
+  resetReshuffleClock(state)
   state.status = 'failed'
 }
 
@@ -735,6 +824,7 @@ function beginRound(state: GameState): void {
   state.roundScore = 0
   state.groupStats = emptyGroupStats()
   state.targetStats = []
+  resetReshuffleClock(state)
   state.status = 'playing'
   beginTarget(state)
 }
@@ -773,7 +863,7 @@ export function advanceToPuzzle(state: GameState, puzzleId: number): void {
   beginRound(state)
 }
 
-/** Switch Easy/Hard mid-session: reload bests for the new bucket, keep puzzle seed. */
+/** Switch difficulty mid-session: reload bests for the new bucket, keep puzzle seed. */
 export function setDifficulty(state: GameState, difficulty: Difficulty): void {
   if (state.difficulty === difficulty) return
   state.difficulty = difficulty

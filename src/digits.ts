@@ -29,7 +29,7 @@ export const HARD_DIRS: Dir[] = [
 ]
 
 export function dirsForDifficulty(difficulty: Difficulty): Dir[] {
-  return difficulty === 'hard' ? HARD_DIRS : EASY_DIRS
+  return difficulty === 'easy' ? EASY_DIRS : HARD_DIRS
 }
 
 /** Digit-string length for a board size tier. */
@@ -280,7 +280,6 @@ export function generateDigitBoard(
   stageTargets?: number[],
 ): PuzzleBoard {
   const targets = allTargets ?? shuffleDigitTargets(puzzleId)
-  const len = digitLengthForGrid(grid)
   const { start, end } = (() => {
     // Infer stage from grid size.
     if (grid <= 8) return { start: 0, end: 2 }
@@ -288,27 +287,81 @@ export function generateDigitBoard(
     return { start: 6, end: 9 }
   })()
   const placeList = stageTargets ?? targets.slice(start, end + 1)
+  return buildDigitCells({
+    puzzleId,
+    grid,
+    difficulty,
+    targets,
+    placeList,
+    salt: 0,
+  })
+}
+
+function difficultySalt(difficulty: Difficulty): number {
+  if (difficulty === 'hard') return 0x11
+  if (difficulty === 'expert') return 0x22
+  return 0
+}
+
+interface BuildDigitOpts {
+  puzzleId: number
+  grid: GridSize
+  difficulty: Difficulty
+  targets: number[]
+  placeList: number[]
+  /** Extra entropy (Expert reshuffle count). */
+  salt: number
+  /** Cell indices that must keep their values (found DigitsFind lines). */
+  locked?: ReadonlyMap<number, number>
+  /**
+   * Targets still needing placement. Defaults to full placeList.
+   * Locked cells are assumed to already realize any omitted (found) targets.
+   */
+  toPlace?: number[]
+  /** All stage targets for uniqueness checks (found + unfound). */
+  validateList?: number[]
+}
+
+function buildDigitCells(opts: BuildDigitOpts): PuzzleBoard {
+  const { puzzleId, grid, difficulty, targets, placeList, salt } = opts
+  const len = digitLengthForGrid(grid)
+  const locked = opts.locked
+  const toPlace = opts.toPlace ?? placeList
+  const validateList = opts.validateList ?? placeList
   const dirs = dirsForDifficulty(difficulty)
-  // Placement uses Easy dirs only for intentional layout on Easy;
-  // Hard may place in any Hard dir. Accidental-dupe scan always uses full allowed set.
   const placeDirs = dirs
-
   const count = cellCountForGrid(grid)
-  const baseRand = mulberry32(hashSeed(puzzleId ^ 0x61a17 ^ (grid * 0x9e37) ^ (difficulty === 'hard' ? 0x11 : 0)))
+  const baseRand = mulberry32(
+    hashSeed(puzzleId ^ 0x61a17 ^ (grid * 0x9e37) ^ difficultySalt(difficulty) ^ (salt * 0x9e37)),
+  )
 
-  const lengths = placeList.map(() => len)
-  const digitLists = placeList.map((t) =>
+  const lengths = validateList.map(() => len)
+  const placeDigitLists = toPlace.map((t) =>
+    Array.from(formatDigitTarget(t, len), (ch) => Number(ch)),
+  )
+  const allDigitLists = validateList.map((t) =>
     Array.from(formatDigitTarget(t, len), (ch) => Number(ch)),
   )
 
   for (let attempt = 0; attempt < 80; attempt++) {
-    const rand = mulberry32(hashSeed((puzzleId + attempt * 9973) ^ (grid << 8) ^ 0x61a17))
+    const rand = mulberry32(
+      hashSeed((puzzleId + attempt * 9973 + salt * 7919) ^ (grid << 8) ^ 0x61a17 ^ salt),
+    )
     const cells: (number | null)[] = new Array(count).fill(null)
     const fixed = new Array(count).fill(false)
-    let placedOk = true
 
-    for (let ti = 0; ti < digitLists.length; ti++) {
-      const digits = digitLists[ti]!
+    if (locked) {
+      for (const [i, v] of locked) {
+        if (i >= 0 && i < count) {
+          cells[i] = v
+          fixed[i] = true
+        }
+      }
+    }
+
+    let placedOk = true
+    for (let ti = 0; ti < placeDigitLists.length; ti++) {
+      const digits = placeDigitLists[ti]!
       const candidates: { r: number; c: number; dir: Dir }[] = []
       for (const dir of placeDirs) {
         for (let r = 0; r < grid; r++) {
@@ -326,8 +379,6 @@ export function generateDigitBoard(
       shuffleInPlace(candidates, rand)
       let chosen: { r: number; c: number; dir: Dir } | null = null
       for (const cand of candidates) {
-        // Tentatively place and ensure we don't create a second copy of earlier targets yet —
-        // full validation runs after fill; here just place.
         placeDigits(cells, grid, digits, cand.r, cand.c, cand.dir)
         for (let k = 0; k < digits.length; k++) {
           fixed[idx(rr(cand.r, cand.dir, k), cc(cand.c, cand.dir, k), grid)] = true
@@ -343,19 +394,18 @@ export function generateDigitBoard(
 
     if (!placedOk) continue
 
-    // Filler regeneration loop: keep fixed target cells, reshuffle empty ones.
     for (let fillTry = 0; fillTry < 40; fillTry++) {
       clearUnfixed(cells, fixed)
       const fillRand = mulberry32(
-        hashSeed(puzzleId ^ (attempt * 131) ^ (fillTry * 9176) ^ (grid * 3) ^ 0xc0ffee),
+        hashSeed(
+          puzzleId ^ (attempt * 131) ^ (fillTry * 9176) ^ (grid * 3) ^ 0xc0ffee ^ (salt * 4049),
+        ),
       )
-      fillEmpty(cells, fixed, digitLists, fillRand)
-      // Prefer near-miss patterns: sprinkle target prefixes that dead-end.
-      sprinkleNearMisses(cells, fixed, grid, digitLists, placeDirs, fillRand)
+      fillEmpty(cells, fixed, allDigitLists, fillRand)
+      sprinkleNearMisses(cells, fixed, grid, allDigitLists, placeDirs, fillRand)
 
       const finalCells = finalizeCells(cells)
-      if (validateUniqueTargets(finalCells, grid, placeList, lengths, dirs)) {
-        // Consume baseRand so seed path stays tied to difficulty/grid.
+      if (validateUniqueTargets(finalCells, grid, validateList, lengths, dirs)) {
         void baseRand()
         return {
           grid,
@@ -366,16 +416,67 @@ export function generateDigitBoard(
     }
   }
 
-  // Fallback: sparse placement with zeros elsewhere (should be rare).
+  // Fallback: keep locked cells; sparse-place remaining targets into free slots.
   const cells = new Array(count).fill(0)
+  if (locked) {
+    for (const [i, v] of locked) {
+      if (i >= 0 && i < count) cells[i] = v
+    }
+  }
   let cursor = 0
-  for (const digits of digitLists) {
-    for (let k = 0; k < digits.length && cursor < count; k++) {
+  for (const digits of placeDigitLists) {
+    for (let k = 0; k < digits.length; k++) {
+      while (cursor < count && locked?.has(cursor)) cursor++
+      if (cursor >= count) break
       cells[cursor++] = digits[k]!
     }
     cursor += 1
   }
   return { grid, cells, targets }
+}
+
+/**
+ * Expert reshuffle: keep found DigitsFind cells locked, re-place remaining
+ * stage targets fairly (exactly once in allowed dirs), reseed from
+ * puzzleId + reshuffleCount.
+ */
+export function reshuffleDigitBoard(
+  puzzleId: number,
+  board: PuzzleBoard,
+  difficulty: Difficulty,
+  foundCells: ReadonlySet<number>,
+  foundTargets: ReadonlySet<number>,
+  reshuffleCount: number,
+): PuzzleBoard {
+  const grid = board.grid
+  const { start, end } = (() => {
+    if (grid <= 8) return { start: 0, end: 2 }
+    if (grid <= 10) return { start: 3, end: 5 }
+    return { start: 6, end: 9 }
+  })()
+  const placeList = board.targets.slice(start, end + 1)
+  const toPlace: number[] = []
+  for (let i = start; i <= end; i++) {
+    if (!foundTargets.has(i)) toPlace.push(board.targets[i]!)
+  }
+
+  const locked = new Map<number, number>()
+  for (const i of foundCells) {
+    if (i >= 0 && i < board.cells.length) locked.set(i, board.cells[i]!)
+  }
+
+  // If nothing left to place, only refresh unlocked filler while keeping uniqueness.
+  return buildDigitCells({
+    puzzleId,
+    grid,
+    difficulty,
+    targets: board.targets,
+    placeList,
+    salt: reshuffleCount,
+    locked,
+    toPlace,
+    validateList: placeList,
+  })
 }
 
 /**

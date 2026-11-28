@@ -24,7 +24,7 @@ function assert(cond: boolean, msg: string): void {
   }
 }
 
-for (const difficulty of ['easy', 'hard'] as const) {
+for (const difficulty of ['easy', 'hard', 'expert'] as const) {
   for (let puzzle = 1; puzzle <= 40; puzzle++) {
     for (const grid of [8, 10, 12] as const) {
       const all = shuffleDigitTargets(puzzle)
@@ -51,7 +51,7 @@ for (const difficulty of ['easy', 'hard'] as const) {
     }
   }
 }
-assert(fails === 0, '40 puzzles × 3 grids × 2 diffs unique')
+assert(fails === 0, '40 puzzles × 3 grids × 3 diffs unique')
 
 const easy = dirsForDifficulty('easy')
 assert(lineIndices(8, 0, 9, easy) == null, 'easy rejects diagonal 0→9')
